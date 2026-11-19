@@ -1,0 +1,507 @@
+{
+  "account": {
+    "actions": {
+      "change_password": "Change Password",
+      "manage_password": "Manage Password",
+      "save_preferences": "Save Preferences",
+      "switch_to": "Switch to",
+      "update_password": "Update your account password."
+    },
+    "descriptions": {
+      "notification_desc": "Choose which events trigger email notifications."
+    },
+    "labels": {
+      "account_settings": "Account Settings",
+      "appearance": "Appearance",
+      "currently_using": "Currently using",
+      "customize_experience": "Customize your experience.",
+      "notifications": "Notifications",
+      "preferences": "Preferences",
+      "saved": "Saved"
+    }
+  },
+  "ai": {
+    "labels": {
+      "ai_assistant": "AI Assistant"
+    }
+  },
+  "app": {
+    "branding": {
+      "app_name": "Migration Assistant for Apache Iceberg",
+      "sign_in": "Sign in to continue"
+    }
+  },
+  "auth": {
+    "labels": {
+      "access_denied": "Access Denied"
+    },
+    "messages": {
+      "admin_only_sources": "Only administrators can manage sources.",
+      "admin_only_users": "Only administrators can manage users."
+    }
+  },
+  "aws": {
+    "descriptions": {
+      "account_id_desc": "The 12-digit AWS account ID where the Glue Data Catalog resides"
+    },
+    "labels": {
+      "aws_account": "AWS Account",
+      "aws_account_id": "AWS Account ID *",
+      "iam_role": "IAM Role",
+      "iam_role_arn": "IAM Role ARN"
+    }
+  },
+  "common": {
+    "actions": {
+      "assign": "Assign",
+      "cancel": "Cancel",
+      "close": "Close",
+      "copy_to_clipboard": "Copy to clipboard",
+      "delete": "Delete",
+      "edit": "Edit",
+      "manage": "Manage",
+      "show": "Show",
+      "view": "View",
+      "view_all": "View All"
+    },
+    "labels": {
+      "actions": "Actions",
+      "analysis": "Analysis",
+      "analyzing_status": "analyzing...",
+      "categories": "Categories",
+      "complete": "Complete",
+      "completed": "Completed",
+      "completed_on": "Completed on:",
+      "created": "Created",
+      "created_label": "Created:",
+      "database": "Database",
+      "default": "Default",
+      "description": "Description",
+      "duration": "Duration",
+      "email": "Email",
+      "error": "Error",
+      "errors": "Errors",
+      "format": "Format",
+      "group": "Group",
+      "groups": "Groups",
+      "location": "Location",
+      "members": "Members",
+      "name": "Name",
+      "never": "Never",
+      "no": "no",
+      "none_type": "None",
+      "not_set": "not set",
+      "of": "of",
+      "owner": "Owner",
+      "owners": "Owners:",
+      "page": "Page",
+      "password": "Password",
+      "per_page": "per page",
+      "protected": "Protected",
+      "resubmitting": "Resubmitting",
+      "role": "Role",
+      "size": "Size",
+      "source": "Source",
+      "started": "Started",
+      "status": "Status",
+      "table": "Table",
+      "target": "Target",
+      "type": "Type",
+      "username": "Username",
+      "yes": "yes"
+    },
+    "loading": {
+      "analyzing": "Analyzing",
+      "analyzing_ellipsis": "Analyzing...",
+      "cleaning_up": "Cleaning up pipelines and resources",
+      "completing_cutover": "Completing pipelines and performing table cutover",
+      "creating_pipeline": "Creating pipeline and submitting to the engine",
+      "deleting_migration": "Deleting migration...",
+      "finalizing_migration": "Finalizing migration...",
+      "initializing_analysis": "Initializing analysis...",
+      "might_take_minutes": "This might take a few minutes",
+      "might_take_seconds": "This might take a few seconds",
+      "preparing_execution": "Preparing migration execution...",
+      "refreshing": "Refreshing...",
+      "submitting_pipelines": "Submitting pipelines to the engine"
+    },
+    "roles": {
+      "admin": "Admin",
+      "editor": "editor",
+      "viewer": "viewer"
+    }
+  },
+  "dashboard": {
+    "descriptions": {
+      "overview": "Overview of your Iceberg migration activity",
+      "source_banner": "Create a source to get started. Sources connect the Migration Assistant to your Glue Data Catalog so tables can be discovered and migrated."
+    },
+    "labels": {
+      "active_and_recent": "Active and recent migrations",
+      "active_migrations": "Active Migrations",
+      "completed_on": "Completed on",
+      "migration_progress": "Migration Progress",
+      "of_total": "of {{count}} total",
+      "plans_in_progress": "Plans in progress"
+    },
+    "messages": {
+      "no_active_plans": "No active plans.",
+      "no_migrations_yet": "No migrations yet."
+    }
+  },
+  "engine": {
+    "labels": {
+      "engine_unavailable": "Migration engine unavailable"
+    }
+  },
+  "inventory": {
+    "actions": {
+      "add_tables_to_plan": "Add {{count}} table(s) to Plan",
+      "add_to_plan": "Add to Plan",
+      "assigned_to_plan": "Assigned to Plan",
+      "browse_tables": "Browse tables available for migration to Iceberg",
+      "change_owner": "Change Owner",
+      "change_owner_for": "Change Ownership for {{count}} table(s)",
+      "change_ownership": "Change Ownership",
+      "deselect_all": "Deselect All",
+      "exclude_iceberg": "Exclude Iceberg",
+      "refresh_source": "Refresh Source",
+      "select_all": "Select All",
+      "select_plan": "Select a plan to add the tables to",
+      "show_all": "Show All"
+    },
+    "labels": {
+      "all_tables": "All Tables",
+      "facet_help_prefix": "Use",
+      "facet_help_exact": "exact,",
+      "facet_help_contains": "contains.",
+      "non_iceberg_tables": "Non-Iceberg Tables",
+      "not_in_plan": "Not in Plan",
+      "s3_location": "S3 Location",
+      "table_details": "Table Details"
+    },
+    "messages": {
+      "no_draft_plans": "No draft plans available. Create a plan first."
+    }
+  },
+  "migrations": {
+    "labels": {
+      "migration_not_found": "Migration not found."
+    },
+    "messages": {
+      "no_migrations_match": "No migrations match."
+    }
+  },
+  "nav": {
+    "account": "Account",
+    "actions": {
+      "logout": "Logout"
+    },
+    "labels": {
+      "dashboard": "Dashboard",
+      "inventory": "Inventory",
+      "migrations": "Migrations",
+      "plans": "Plans",
+      "settings": "Settings",
+      "sources": "Sources",
+      "user_management": "User Management"
+    }
+  },
+  "pipeline": {
+    "descriptions": {
+      "athena_queries": "Athena ({{count}} queries)",
+      "emr_vcpu_hrs": "EMR ({{hours}} vCPU-hrs)"
+    },
+    "labels": {
+      "active_job": "Active Job",
+      "athena_cost": "Athena:",
+      "batch": "Batch",
+      "batch_size": "Batch Size",
+      "batches": "Batches",
+      "compute_cost": "Compute Cost",
+      "emr_cost": "EMR:",
+      "estimated_cost": "Estimated Cost",
+      "estimated_size": "Estimated Size",
+      "estimated_time": "Estimated Time",
+      "next_sync": "Next Sync",
+      "pipeline_details": "Pipeline Details",
+      "pipeline_id": "Pipeline ID",
+      "pipeline_progress": "Pipeline Progress",
+      "sync_status": "Sync Status",
+      "table_status": "Table Status",
+      "total_compute_cost": "Total Compute Cost:"
+    },
+    "messages": {
+      "no_batch_data": "No batch data available yet."
+    }
+  },
+  "plans": {
+    "actions": {
+      "add_tables": "Add Tables",
+      "configure_plan": "Configure the plan settings. Tables are added from the Inventory page after creation.",
+      "create_migration_plan": "Create Migration Plan",
+      "create_plans_desc": "Create plans, add tables from Inventory, then finalize to migrate.",
+      "finalize": "Finalize",
+      "new_plan": "New Plan",
+      "track_migrations": "Track and execute finalized migration plans"
+    },
+    "labels": {
+      "migration_plans": "Migration Plans",
+      "plan_context": "Provide context about the purpose and scope of this migration plan",
+      "plan_name": "Plan Name *",
+      "plan_unique_name": "A unique name to identify this migration plan"
+    },
+    "messages": {
+      "no_plans_match": "No plans match.",
+      "no_plans_yet": "No plans yet."
+    }
+  },
+  "settings": {
+    "actions": {
+      "configure_engine": "Configure engine parameters. Changes persist across restarts."
+    },
+    "messages": {
+      "admin_only_settings": "Only administrators can manage settings."
+    }
+  },
+  "sources": {
+    "actions": {
+      "add_first_source": "Add your first source",
+      "add_source": "Add Source",
+      "choose_catalog_type": "Select the type of data catalog to connect",
+      "choose_db_filter": "Choose whether to include only specific databases or exclude certain databases during discovery",
+      "connect_source": "Connect a data catalog source to discover tables for migration",
+      "create_source": "Create Source",
+      "discover_tables": "Discover tables from AWS Glue",
+      "exclude_databases": "Exclude databases",
+      "include_only": "Include only",
+      "manage_sources": "Manage data catalog sources for table discovery",
+      "refresh_log": "Refresh Log",
+      "view_refresh_log": "View refresh log"
+    },
+    "descriptions": {
+      "db_filter_exclude_desc": "Comma-separated list of database names to skip during discovery. Leave blank to import all.",
+      "db_filter_include_desc": "Comma-separated list of database names to import. Only these databases will be scanned.",
+      "default_ownership_desc": "Tables discovered from this source will be assigned to this group by default",
+      "iam_role_arn_desc": "Provide a cross-account or custom IAM role ARN to assume when connecting to the Glue Data Catalog. If left blank, the application will use the default IAM role attached to the application.",
+      "last_refresh_summary": "Last refresh summary and errors."
+    },
+    "labels": {
+      "aws_glue_data_catalog": "AWS Glue Data Catalog",
+      "database_filter": "Database Filter",
+      "databases_scanned": "Databases scanned:",
+      "default_ownership": "Default Ownership",
+      "last_refresh": "Last Refresh",
+      "last_refreshed": "Last Refreshed",
+      "more_sources_soon": "More sources coming soon",
+      "source_friendly_name": "A friendly name to identify this source",
+      "source_name": "Source Name *",
+      "source_type": "Source Type *",
+      "tables_added": "Tables added:",
+      "tables_orphaned": "Tables orphaned:",
+      "tables_removed": "Tables removed:",
+      "tables_updated": "Tables updated:"
+    },
+    "messages": {
+      "no_refresh_errors": "No refresh errors recorded.",
+      "no_sources": "No sources configured yet."
+    },
+    "tables_discovered": "Tables discovered:"
+  },
+  "users": {
+    "actions": {
+      "add_user": "Add User",
+      "assign_user_to_group": "Assign User to Group",
+      "assign_users_desc": "Assign users to groups with a specific role (manage or view)",
+      "create_group": "Create Group",
+      "create_user": "Create User",
+      "create_user_desc": "Create a new user account.",
+      "manage_users": "Manage users, groups, and role assignments",
+      "manage_users_desc": "Create and manage user accounts",
+      "new_group": "New Group",
+      "new_password": "New Password",
+      "reset_password": "Reset Password",
+      "select_group": "Select a group...",
+      "select_user": "Select user..."
+    },
+    "descriptions": {
+      "group_desc": "Groups are used to assign ownership of migration plans",
+      "group_membership_desc": "Groups you belong to. Contact an admin to modify group assignments.",
+      "password_requirements": "Min 8 characters: 1 uppercase, 1 lowercase, 1 digit, 1 special character."
+    },
+    "labels": {
+      "auto_generate": "Auto-generate",
+      "confirm_new_password": "Confirm New Password",
+      "current_assignments": "Current Assignments",
+      "current_password": "Current Password",
+      "email_address": "Email Address",
+      "full_name": "Full Name *",
+      "group_membership": "Group Membership",
+      "group_name": "Group Name *",
+      "group_name_header": "Group Name",
+      "loading_groups": "Loading groups...",
+      "password_field": "Password *",
+      "system_role": "System Role",
+      "user": "User",
+      "user_roles": "User Roles",
+      "username_field": "Username *",
+      "users": "Users"
+    },
+    "messages": {
+      "no_assignments_match": "No assignments match your filter.",
+      "no_assignments_yet": "No group assignments yet. Use the form above to assign users to groups.",
+      "no_group_membership": "You are not a member of any groups.",
+      "no_groups": "No groups yet."
+    }
+  },
+  "form": {
+    "actions": {
+      "add_files": "Add Files",
+      "add_files_desc": "Registers existing Parquet files into Iceberg using the native add_files procedure via EMR Serverless. No data movement — partitioned Parquet only.",
+      "add_files_engine_note": "Requires EMR Serverless as execution engine.",
+      "choose_engine": "Choose the compute engine for running migration queries",
+      "choose_strategies": "Select one or more migration strategies for this plan.",
+      "choose_target": "Choose where your Iceberg tables will be created",
+      "replace_tables": "Replace original tables after migration"
+    },
+    "descriptions": {
+      "bucket_arn_desc": "The ARN of the S3 Table Bucket where Iceberg tables will be created",
+      "engine_athena_desc": "Serverless SQL queries. Best for small-to-medium tables and quick setup.",
+      "engine_emr_desc": "Spark-based execution. Best for large tables, complex transforms, and high throughput.",
+      "incremental_desc": "Partition-by-partition rewrite with change tracking. Migrates in batches with minimal downtime.",
+      "morph_desc": "Transforms table format to Iceberg by tracking files and generating manifests dynamically. No data movement — original data stays in place. Supported for Parquet, Hudi, and Delta.",
+      "no_strategy_error": "Select at least one migration strategy.",
+      "owners_desc": "Groups that own this plan — can add tables, edit configuration, and finalize",
+      "rewrite_desc": "Full table rewrite in one shot (CTAS). Clean copy into a new Iceberg table.",
+      "s3tables_managed_desc": "S3 Tables managed migration of Parquet tables directly into Amazon S3 Tables. S3 Tables plans and runs the migration; you review the compatibility report and approve before initating the migration and the cutover.",
+      "s3tables_managed_target_note": "Only available with the Amazon S3 Tables target.",
+      "s3_tables_swap_note": "Not available with Amazon S3 Tables target.",
+      "swap_tables_desc": "When enabled, the original table is dropped and the Iceberg table is renamed to take its place. When disabled, both tables coexist.",
+      "target_s3_iceberg_desc": "Self-managed Iceberg tables stored in your S3 General-Purpose buckets",
+      "target_s3_tables_desc": "Fully managed Iceberg tables with automatic compaction, snapshot management, and optimized performance."
+    },
+    "labels": {
+      "amazon_athena": "Amazon Athena",
+      "amazon_s3_tables": "Amazon S3 Tables",
+      "analysis": "Analysis",
+      "apache_iceberg_on_s3": "Apache Iceberg on Amazon S3",
+      "bucket_arn": "Bucket ARN",
+      "emr_serverless": "EMR Serverless",
+      "estimates": "Estimates",
+      "execution_engine": "Execution Engine",
+      "incremental": "Incremental",
+      "migration_type": "Migration Type",
+      "morph": "Morph",
+      "s3tables_managed": "Managed Migration",
+      "owners": "Owners:",
+      "recommended": "Recommended",
+      "rewrite": "Rewrite",
+      "s3_table_bucket_arn": "S3 Table Bucket ARN *",
+      "target": "Target",
+      "target_locked": "Target cannot be changed after plan creation."
+    }
+  },
+  "detail": {
+    "completed_on": "Completed on:",
+    "labels": {
+      "agent_reasoning": "Agent Reasoning",
+      "compression": "Compression",
+      "created_on": "Created on:",
+      "edit_prefix": "Edit:",
+      "engine_label": "Engine:",
+      "iceberg_properties": "Iceberg Properties",
+      "migration_spec": "Migration Spec",
+      "partition_keys": "Partition Keys",
+      "partition_spec": "Partition Spec",
+      "partitioned": "Partitioned",
+      "sort_order": "Sort Order",
+      "source": "Source",
+      "spec": "Spec",
+      "spec_json": "Spec JSON",
+      "strategy": "Strategy",
+      "summary": "Summary",
+      "target_label": "Target:",
+      "types_label": "Types:"
+    },
+    "spec_json": "Spec JSON",
+    "summary": "Summary"
+  },
+  "actions": {
+    "actions": {
+      "archive": "Archive",
+      "back_to_planning": "Back to Planning",
+      "execute": "Execute",
+      "finalize_migration": "Finalize Migration",
+      "pause_all": "Pause All",
+      "resume_all": "Resume All"
+    }
+  },
+  "errors": {
+    "labels": {
+      "message": "Plan not found."
+    }
+  },
+  "validation": {
+    "labels": {
+      "validation": "Validation",
+      "validate_migration": "Validate migration",
+      "validation_depth": "Validation depth",
+      "basic": "Basic",
+      "advanced": "Advanced",
+      "tier": "Tier",
+      "last_run": "Last run",
+      "by": "By",
+      "run_validation": "Run validation",
+      "status_not_run": "Not validated",
+      "status_passed": "Validation passed",
+      "status_failed": "Validation failed",
+      "status_stale": "New batch since last validation"
+    },
+    "descriptions": {
+      "compare_source_target": "Compare source and target for {{target}}. Runs on the plan's execution engine.",
+      "basic_desc": "Fast structural checks — counts, schema, bounds.",
+      "advanced_desc": "Basic plus aggregates, per-partition counts. Slower and higher cost.",
+      "checks_count": "Checks ({{count}})",
+      "excluded_count": "Excluded ({{count}})",
+      "applicable_subset": "The engine runs the applicable subset per table (e.g. partition checks only for partitioned tables). Checks that don't apply are reported as skipped.",
+      "loading": "Loading validation…"
+    }
+  },
+  "managed_migration": {
+    "labels": {
+      "plan_review": "Migration plan review",
+      "awaiting_review": "awaiting review",
+      "objects": "Objects",
+      "partitions": "Partitions",
+      "size": "Size",
+      "compatibility_findings": "Compatibility findings",
+      "table_compatibility_report": "Table compatibility report",
+      "object_compatibility_report": "Object compatibility report",
+      "approve_migration": "Approve migration",
+      "request_payload": "Migration Request Payload",
+      "migration_progress": "Migration Progress",
+      "last_sync": "Last sync",
+      "migrated": "Migrated",
+      "pending": "Pending",
+      "failed": "Failed",
+      "total_objects": "Total objects:",
+      "objects_scanned": "Objects scanned:",
+      "objects_planned": "Objects planned:",
+      "partitions_colon": "Partitions:"
+    },
+    "descriptions": {
+      "review_intro": "AWS has planned this managed migration. Review the compatibility report below, then approve to begin data movement.",
+      "request_payload_desc": "The exact request the Migration Assistant sent to the AWS S3 Tables StartTableMigration API for this migration."
+    }
+  },
+  "plan_detail": {
+    "messages": {
+      "analysis_not_run": "Analysis has not been run yet. Use the AI Assistant to analyze this table."
+    }
+  },
+  "force_password": {
+    "messages": {
+      "must_set_password": "You must set a new password before continuing."
+    }
+  }
+}

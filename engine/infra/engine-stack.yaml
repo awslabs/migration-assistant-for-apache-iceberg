@@ -1,0 +1,1564 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Migration Assistant engine — complete deployment stack.
+  Includes VPC, DynamoDB, ECS Fargate, Athena, EMR Serverless,
+  S3 event tracking infrastructure, and optional XTable Lambda.
+
+Parameters:
+
+  # ─── General ──────────────────────────────────────────────────────
+  EnvironmentName:
+    Type: String
+    Default: ima
+    Description: Prefix for all resource names
+
+  # ─── Networking ───────────────────────────────────────────────────
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+
+  # ─── ECS / Engine ─────────────────────────────────────────────────
+  EngineImageUri:
+    Type: String
+    Description: ECR image URI for the engine container
+
+  EngineCpu:
+    Type: String
+    Default: "1024"
+    AllowedValues: ["512", "1024", "2048", "4096"]
+
+  EngineMemory:
+    Type: String
+    Default: "2048"
+    AllowedValues: ["1024", "2048", "4096", "8192"]
+
+  ReconcileIntervalSeconds:
+    Type: Number
+    Default: 30
+
+  ValidationWorkers:
+    Type: Number
+    Default: 5
+    Description: Max concurrent Athena validation pipelines run in parallel by the engine.
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+
+  # ─── XTable Lambda (Optional) ─────────────────────────────────────
+  XTableImageUri:
+    Type: String
+    Default: ""
+    Description: ECR image URI for XTable Lambda (leave empty to skip)
+
+  XTableMemorySize:
+    Type: Number
+    Default: 4096
+
+  # ─── Data-plane access (least-privilege, parameterized) ──────────
+  # Provide these at deploy time to have the template generate TIGHTLY SCOPED
+  # data-plane policies (specific bucket ARNs + aws:ResourceAccount conditions,
+  # no s3:Get* wildcards) instead of an inert placeholder the operator must
+  # hand-edit. Leave empty to ship the safe inert-Deny placeholder (migrations
+  # will not work until access is granted — see the deployment guide).
+  SourceBucketNames:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      Source S3 bucket names EMR/Engine/tracker/XTable may READ (no arn: prefix,
+      no wildcards). Leave empty for the inert placeholder.
+
+  TargetBucketNames:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      Target S3 bucket names EMR/XTable may READ and WRITE (migrated Iceberg
+      data). Leave empty for the inert placeholder.
+
+  SourceAccountIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      AWS account IDs that own the source data/catalog. Used as an
+      aws:ResourceAccount guard so the data-plane roles can only reach data in
+      these accounts. Leave empty to skip the guard.
+
+Conditions:
+  DeployXTable: !Not [!Equals [!Ref XTableImageUri, ""]]
+  # Data-plane grants are generated only when the operator supplies bucket names;
+  # otherwise the inert-Deny placeholder ships (safe default).
+  HasSourceBuckets: !Not [!Equals [!Join ["", !Ref SourceBucketNames], ""]]
+  NoSourceBuckets: !Equals [!Join ["", !Ref SourceBucketNames], ""]
+  HasTargetBuckets: !Not [!Equals [!Join ["", !Ref TargetBucketNames], ""]]
+  HasSourceAccounts: !Not [!Equals [!Join ["", !Ref SourceAccountIds], ""]]
+  # XTable Lambda is optional (DeployXTable); its data-plane policy variant is
+  # chosen by whether source buckets were supplied.
+  DeployXTableNoBuckets: !And [!Condition DeployXTable, !Condition NoSourceBuckets]
+  DeployXTableWithBuckets: !And [!Condition DeployXTable, !Condition HasSourceBuckets]
+
+Resources:
+
+  # ═══════════════════════════════════════════════════════════════════
+  # NETWORKING
+  # ═══════════════════════════════════════════════════════════════════
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-vpc"
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-private-a"
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-private-b"
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-public-a"
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-public-b"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  DynamoDBGatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Engine tasks
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8001
+          ToPort: 8001
+          CidrIp: !Ref VpcCIDR
+          Description: Engine API from VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to AWS APIs (DynamoDB, Athena, EMR, S3, Glue)
+
+  # ═══════════════════════════════════════════════════════════════════
+  # S3 BUCKETS
+  # ═══════════════════════════════════════════════════════════════════
+
+  ScriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-scripts-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogsBucket
+        LogFilePrefix: s3-access-logs/scripts/
+
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-logs-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Self-log into this same bucket under a dedicated prefix. DestinationBucketName
+      # is omitted deliberately: CloudFormation defaults it to THIS bucket (per the
+      # LoggingConfiguration docs), so there is no self-!Ref and therefore no circular
+      # dependency. The access-log objects fall under the ExpireLogs lifecycle rule.
+      LoggingConfiguration:
+        LogFilePrefix: s3-access-logs/logs/
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: 30
+
+  # ═══════════════════════════════════════════════════════════════════
+  # DYNAMODB TABLES
+  # ═══════════════════════════════════════════════════════════════════
+
+  DynamoDBEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "CMK for ${EnvironmentName} DynamoDB table encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  DynamoDBEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${EnvironmentName}-dynamodb"
+      TargetKeyId: !Ref DynamoDBEncryptionKey
+
+  PipelinesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-pipelines-${AWS::Region}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  BatchesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-batches-${AWS::Region}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      KeySchema:
+        - AttributeName: pipeline_id
+          KeyType: HASH
+        - AttributeName: batch_number
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: pipeline_id
+          AttributeType: S
+        - AttributeName: batch_number
+          AttributeType: "N"
+
+  ProgressTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-progress-${AWS::Region}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      KeySchema:
+        - AttributeName: pipeline_id
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: pipeline_id
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+
+  ObjectTrackingTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-object-tracking-${AWS::Region}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      KeySchema:
+        - AttributeName: pipeline_id
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: pipeline_id
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi_pk
+          AttributeType: S
+        - AttributeName: received_at
+          AttributeType: S
+      GlobalSecondaryIndexes:
+        - IndexName: status-pipeline-index
+          KeySchema:
+            - AttributeName: gsi_pk
+              KeyType: HASH
+            - AttributeName: received_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  SnapshotsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-snapshots-${AWS::Region}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      KeySchema:
+        - AttributeName: pipeline_id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: pipeline_id
+          AttributeType: S
+
+  CostsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-costs-${AWS::Region}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      KeySchema:
+        - AttributeName: pipeline_id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: pipeline_id
+          AttributeType: S
+
+  ValidationResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${EnvironmentName}-validation-results-${AWS::Region}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      KeySchema:
+        - AttributeName: pipeline_id
+          KeyType: HASH
+        - AttributeName: run_id
+          KeyType: RANGE
+      AttributeDefinitions:
+        - AttributeName: pipeline_id
+          AttributeType: S
+        - AttributeName: run_id
+          AttributeType: S
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ATHENA
+  # ═══════════════════════════════════════════════════════════════════
+
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-migrations"
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${LogsBucket}/athena-query-results/"
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        BytesScannedCutoffPerQuery: 10737418240
+        EngineVersion:
+          SelectedEngineVersion: "Athena engine version 3"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # EMR SERVERLESS
+  # ═══════════════════════════════════════════════════════════════════
+
+  EmrExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: emr-serverless.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        # Solution-owned resources only. All source/target data, Glue catalog,
+        # S3 Tables and Lake Formation access is granted post-deployment via the
+        # EmrDataAccessPolicy placeholder below (see deployment guide).
+        - PolicyName: EmrSolutionAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Read PySpark scripts + spark_sql_builder from the scripts bucket
+              - Sid: ScriptsBucketRead
+                Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt ScriptsBucket.Arn
+                  - !Sub "${ScriptsBucket.Arn}/*"
+              # Never allow EMR jobs to write to the scripts bucket they execute
+              # from (defense-in-depth against a customer data-access policy that
+              # inadvertently grants broad S3 writes — Deny always wins).
+              - Sid: ScriptsBucketDenyWrite
+                Effect: Deny
+                Action: [s3:PutObject, s3:DeleteObject, s3:PutObjectAcl]
+                Resource: !Sub "${ScriptsBucket.Arn}/*"
+              # Write EMR job logs to the logs bucket
+              - Sid: LogsBucketWrite
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt LogsBucket.Arn
+                  - !Sub "${LogsBucket.Arn}/*"
+              # EMR Serverless job log delivery
+              - Sid: EmrLogDelivery
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/emr-serverless/*"
+              # The validation Spark job (spark/validate.py) writes each
+              # pipeline's result row directly to the validation-results table
+              # as it completes. Scoped to that one solution-owned table.
+              - Sid: ValidationResultsWrite
+                Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DescribeTable]
+                Resource: !GetAtt ValidationResultsTable.Arn
+              # The validation-results table is encrypted with the solution's
+              # customer-managed CMK. DynamoDB requires the caller to hold KMS
+              # permissions on that key to read/write encrypted items — without
+              # this, UpdateItem fails with a KMS AccessDeniedException
+              # (kms:Decrypt) and the Spark job cannot persist its results.
+              # Mirrors the grant already given to the tracker/engine roles.
+              - Sid: ValidationResultsKms
+                Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey, kms:DescribeKey]
+                Resource: !GetAtt DynamoDBEncryptionKey.Arn
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PLACEHOLDER — data-plane access for EMR jobs. Ships EMPTY (inert Deny).
+  # Customers must replace this with grants to their source data (read),
+  # target data (read/write), Glue catalog, S3 Tables and Lake Formation
+  # after deployment. Migrations WILL NOT WORK until populated.
+  # See deployment guide: "Post-Deployment: Grant Data Access".
+  #
+  # Minimal permission set for this role (data movement — read source,
+  # write target):
+  #   s3:GetObject, s3:ListBucket, s3:GetBucketLocation      (source buckets)
+  #   s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket (target buckets)
+  #   glue: Get* + CreateTable/UpdateTable/DeleteTable/CreateDatabase (target db)
+  #   s3tables:* table/namespace/data actions               (S3 Tables targets)
+  #   lakeformation:GetDataAccess                            (cross-account src)
+  # ─────────────────────────────────────────────────────────────────────
+  # Inert placeholder — always valid, attached only when no source buckets are
+  # supplied at deploy time. Keeps a fresh deployment safe-by-default (no data
+  # access) until the operator provides bucket parameters or hand-grants access.
+  EmrDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: NoSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-emr-data-access"
+      Description: >-
+        PLACEHOLDER (inert Deny) — supply SourceBucketNames/TargetBucketNames at
+        deploy time to generate a least-privilege data-plane policy instead, or
+        grant access after deployment. Migrations will not work until access is
+        granted. See the deployment guide "Post-Deployment: Grant Data Access".
+      Roles:
+        - !Ref EmrExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PlaceholderReplaceMe
+            Effect: Deny
+            Action: "s3:GetObject"
+            Resource: "arn:aws:s3:::ima-placeholder-replace-me/*"
+
+  # Generated least-privilege data-plane policy — created ONLY when the
+  # operator supplies SourceBucketNames. Grants explicit read on the named
+  # source buckets (never s3:Get*), optionally guarded by aws:ResourceAccount so
+  # a mis-typed bucket cannot reach an unrelated account, plus scoped Glue read
+  # and Lake Formation data access. Target read/write is added by
+  # EmrTargetDataAccessPolicy when TargetBucketNames is supplied.
+  EmrDataAccessGrantPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-emr-data-access"
+      Description: >-
+        Least-privilege EMR data-plane access generated from SourceBucketNames.
+        Explicit read actions on named source buckets with an optional
+        aws:ResourceAccount guard, plus scoped Glue catalog read.
+      Roles:
+        - !Ref EmrExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SourceDataRead
+            Effect: Allow
+            Action: [s3:GetObject, s3:GetObjectVersion, s3:ListBucket, s3:GetBucketLocation]
+            Resource:
+              !Split
+                - ","
+                - !Sub
+                    - "arn:aws:s3:::${buckets},arn:aws:s3:::${objects}"
+                    - buckets: !Join [",arn:aws:s3:::", !Ref SourceBucketNames]
+                      objects: !Join ["/*,arn:aws:s3:::", !Ref SourceBucketNames]
+            Condition:
+              !If
+                - HasSourceAccounts
+                - StringEquals:
+                    "aws:ResourceAccount": !Ref SourceAccountIds
+                - !Ref "AWS::NoValue"
+          - Sid: GlueCatalogRead
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetTable
+              - glue:GetTables
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:BatchGetPartition
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+          - Sid: LakeFormationDataAccess
+            Effect: Allow
+            Action: lakeformation:GetDataAccess
+            Resource: "*"
+
+  # Target read/write, generated only when TargetBucketNames is supplied.
+  EmrTargetDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasTargetBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-emr-target-access"
+      Description: >-
+        Least-privilege EMR target data-plane access generated from
+        TargetBucketNames — read/write on named target buckets only.
+      Roles:
+        - !Ref EmrExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TargetDataReadWrite
+            Effect: Allow
+            Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket, s3:GetBucketLocation]
+            Resource:
+              !Split
+                - ","
+                - !Sub
+                    - "arn:aws:s3:::${buckets},arn:aws:s3:::${objects}"
+                    - buckets: !Join [",arn:aws:s3:::", !Ref TargetBucketNames]
+                      objects: !Join ["/*,arn:aws:s3:::", !Ref TargetBucketNames]
+
+  # ═══════════════════════════════════════════════════════════════════
+  # MANAGED MIGRATION (AWS S3 Tables Migration API)
+  # ═══════════════════════════════════════════════════════════════════
+  # Role assumed by the S3 Tables Migration service to read source Hive/Parquet
+  # data, write the target S3 Tables (Iceberg), and drop compatibility/migration
+  # reports into the logs bucket. Trusts migration.s3tables.amazonaws.com. Solution-owned
+  # grants (S3 Tables control/data plane + reports write) are inline; source and
+  # target S3 data-plane reads are granted via the generated managed policy
+  # below (created only when SourceBucketNames/TargetBucketNames are supplied),
+  # mirroring the EMR/engine data-access pattern.
+  S3TablesMigrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-s3tables-migration"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: migration.s3tables.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3TablesMigrationSolutionAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # S3 Tables control + data plane, scoped to this account/region.
+              - Sid: S3TablesAccess
+                Effect: Allow
+                Action: [
+                  "s3tables:GetTableBucket",
+                  "s3tables:ListTableBuckets",
+                  "s3tables:CreateNamespace",
+                  "s3tables:GetNamespace",
+                  "s3tables:ListNamespaces",
+                  "s3tables:CreateTable",
+                  "s3tables:GetTable",
+                  "s3tables:ListTables",
+                  "s3tables:GetTableData",
+                  "s3tables:PutTableData",
+                  "s3tables:GetTableMetadataLocation",
+                  "s3tables:UpdateTableMetadataLocation",
+                ]
+                Resource:
+                  - !Sub "arn:aws:s3tables:${AWS::Region}:${AWS::AccountId}:bucket/*"
+              # Write compatibility + migration reports to the logs bucket under
+              # the dedicated reports prefix, and read them back for the review.
+              - Sid: ReportsWrite
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket, s3:GetBucketLocation]
+                Resource:
+                  - !GetAtt LogsBucket.Arn
+                  - !Sub "${LogsBucket.Arn}/migration-reports/*"
+
+  # PLACEHOLDER (inert Deny) — supply SourceBucketNames at deploy time to
+  # generate a least-privilege source/target read policy instead, or grant
+  # access after deployment. Managed migrations will not work until access is
+  # granted.
+  S3TablesMigrationDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: NoSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-s3tables-migration-data-access"
+      Description: >-
+        PLACEHOLDER (inert Deny) — supply SourceBucketNames at deploy time to
+        generate a least-privilege managed-migration data-plane policy instead.
+        Managed migrations will not work until source access is granted.
+      Roles:
+        - !Ref S3TablesMigrationRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PlaceholderReplaceMe
+            Effect: Deny
+            Action: "s3:GetObject"
+            Resource: "arn:aws:s3:::ima-placeholder-replace-me/*"
+
+  # Generated least-privilege source read for the migration role — created
+  # ONLY when the operator supplies SourceBucketNames. Explicit read on the
+  # named source buckets, optionally guarded by aws:ResourceAccount.
+  S3TablesMigrationDataAccessGrantPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-s3tables-migration-data-access"
+      Description: >-
+        Least-privilege managed-migration source read generated from
+        SourceBucketNames: S3 read on the named source buckets (with an
+        optional aws:ResourceAccount guard) plus read access to the Glue source
+        table the migration is defined against.
+      Roles:
+        - !Ref S3TablesMigrationRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SourceDataRead
+            Effect: Allow
+            Action: [s3:GetObject, s3:GetObjectVersion, s3:ListBucket, s3:GetBucketLocation]
+            Resource:
+              !Split
+                - ","
+                - !Sub
+                    - "arn:aws:s3:::${buckets},arn:aws:s3:::${objects}"
+                    - buckets: !Join [",arn:aws:s3:::", !Ref SourceBucketNames]
+                      objects: !Join ["/*,arn:aws:s3:::", !Ref SourceBucketNames]
+            Condition:
+              !If
+                - HasSourceAccounts
+                - StringEquals:
+                    "aws:ResourceAccount": !Ref SourceAccountIds
+                - !Ref "AWS::NoValue"
+          # The migration's source is a Glue table (source.sourceType=glueTable),
+          # read through the CALLER's account catalog. Without this the service
+          # fails planning with failureReason.code=sourcePermissions even when the
+          # S3 read above is correct. Mirrors the EMR role's GlueCatalogRead.
+          - Sid: GlueSourceRead
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetTable
+              - glue:GetTables
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:BatchGetPartition
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+          # Only exercised when the source database is governed by Lake
+          # Formation (which additionally needs LF grants on the role).
+          - Sid: LakeFormationDataAccess
+            Effect: Allow
+            Action: lakeformation:GetDataAccess
+            Resource: "*"
+
+  EmrServerlessApp:
+    Type: AWS::EMRServerless::Application
+    Properties:
+      Name: !Sub "${EnvironmentName}-spark"
+      # emr-7.5.0+ is required for S3 Tables support; 7.13.0 is the newest 7.x.
+      # S3 Tables are accessed via the AWS Glue Iceberg REST endpoint (see the
+      # s3tablescatalog Spark props in strategies/common.py) — no S3 Tables
+      # client jar is needed on the classpath with this approach.
+      ReleaseLabel: emr-7.13.0
+      Type: SPARK
+      AutoStartConfiguration:
+        Enabled: true
+      AutoStopConfiguration:
+        Enabled: true
+        IdleTimeoutMinutes: 15
+
+  # ═══════════════════════════════════════════════════════════════════
+  # IAM ROLES
+  # ═══════════════════════════════════════════════════════════════════
+
+  TrackingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TrackingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:BatchWriteItem]
+                Resource: !GetAtt ObjectTrackingTable.Arn
+              - Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey]
+                Resource: !GetAtt DynamoDBEncryptionKey.Arn
+              # Source-bucket READ access is granted post-deployment via
+              # TrackingDataAccessPolicy (placeholder below). The tracker Lambda
+              # reads source object keys to record change events. See deployment
+              # guide "Post-Deployment: Grant Data Access".
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PLACEHOLDER — source-data READ access for the S3 event tracker Lambda.
+  # Ships EMPTY (inert Deny). Customers must replace this with READ-ONLY
+  # grants to their source buckets after deployment. Incremental/morph
+  # change tracking WILL NOT WORK until populated.
+  # See deployment guide "Post-Deployment: Grant Data Access".
+  #
+  # Minimal permission set for this role (READ ONLY):
+  #   s3:GetObject, s3:ListBucket   (source buckets being tracked)
+  # ─────────────────────────────────────────────────────────────────────
+  TrackingDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: NoSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-tracking-data-access"
+      Description: >-
+        PLACEHOLDER (inert Deny) — supply SourceBucketNames at deploy time to
+        generate a least-privilege READ-ONLY tracking policy instead, or grant
+        after deployment. Change tracking will not work until access is granted.
+        See the deployment guide "Post-Deployment: Grant Data Access" section.
+      Roles:
+        - !Ref TrackingLambdaRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PlaceholderReplaceMe
+            Effect: Deny
+            Action: "s3:GetObject"
+            Resource: "arn:aws:s3:::ima-placeholder-replace-me/*"
+
+  # Generated least-privilege READ-ONLY source access for the tracker Lambda
+  # Only the named source buckets, optionally account-guarded.
+  TrackingDataAccessGrantPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-tracking-data-access"
+      Description: >-
+        Least-privilege READ-ONLY source access for the S3 event-tracker Lambda
+        generated from SourceBucketNames.
+      Roles:
+        - !Ref TrackingLambdaRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SourceDataRead
+            Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket, s3:GetBucketLocation]
+            Resource:
+              !Split
+                - ","
+                - !Sub
+                    - "arn:aws:s3:::${buckets},arn:aws:s3:::${objects}"
+                    - buckets: !Join [",arn:aws:s3:::", !Ref SourceBucketNames]
+                      objects: !Join ["/*,arn:aws:s3:::", !Ref SourceBucketNames]
+            Condition:
+              !If
+                - HasSourceAccounts
+                - StringEquals:
+                    "aws:ResourceAccount": !Ref SourceAccountIds
+                - !Ref "AWS::NoValue"
+
+  # CMK for the engine API token secret. Decrypt is granted by IAM policy to
+  # the engine and app task EXECUTION roles (ECS injects the secret at task
+  # start); the root statement delegates key access to IAM.
+  EngineSecretsEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "CMK for ${EnvironmentName} engine Secrets Manager encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+  EngineSecretsEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${EnvironmentName}-engine-secrets"
+      TargetKeyId: !Ref EngineSecretsEncryptionKey
+  # Bearer token that the app backend presents to the engine API. Generated by
+  # Secrets Manager; the engine rejects every request (except /api/health)
+  # that does not carry it.
+  EngineApiTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub "${EnvironmentName} engine API bearer token"
+      KmsKeyId: !Ref EngineSecretsEncryptionKey
+      GenerateSecretString:
+        PasswordLength: 64
+        ExcludePunctuation: true
+  EngineTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadEngineApiToken
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref EngineApiTokenSecret
+              - Effect: Allow
+                Action: [kms:Decrypt, kms:DescribeKey]
+                Resource: !GetAtt EngineSecretsEncryptionKey.Arn
+
+  EngineTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3TablesNamespace
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Managed Migration creates the target namespace if it is missing.
+              - Effect: Allow
+                Action: [s3tables:GetNamespace, s3tables:CreateNamespace]
+                Resource: !Sub "arn:aws:s3tables:${AWS::Region}:${AWS::AccountId}:bucket/*"
+        - PolicyName: S3TablesMigrationPassRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # StartTableMigration / SyncTableMigration pass the migration role
+              # (roleARN) to the service. PassRole is constrained to that single
+              # role ARN and may only be passed to the S3 Tables Migration
+              # service — the Engine cannot pass it anywhere else (M4 / T4).
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt S3TablesMigrationRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: migration.s3tables.amazonaws.com
+        - PolicyName: DynamoDB
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query, dynamodb:Scan, dynamodb:BatchWriteItem, dynamodb:CreateTable, dynamodb:DescribeTable]
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${EnvironmentName}-*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${EnvironmentName}-*/index/*"
+              - Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey, kms:DescribeKey]
+                Resource: !GetAtt DynamoDBEncryptionKey.Arn
+        # Solution-owned S3 only. Source read, PutBucketNotification (tracker
+        # setup on source buckets), target write and all Glue catalog access
+        # are granted post-deployment via EngineDataAccessPolicy (placeholder
+        # below — see deployment guide).
+        - PolicyName: S3Solution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Athena query results are written to the logs bucket by the
+              # engine's caller credentials.
+              - Sid: LogsBucketWrite
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket, s3:GetBucketLocation]
+                Resource:
+                  - !GetAtt LogsBucket.Arn
+                  - !Sub "${LogsBucket.Arn}/*"
+        - PolicyName: Athena
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [athena:StartQueryExecution, athena:GetQueryExecution, athena:GetQueryResults, athena:StopQueryExecution]
+                Resource: !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/*"
+        - PolicyName: EMR
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [emr-serverless:StartJobRun, emr-serverless:GetJobRun, emr-serverless:CancelJobRun, emr-serverless:ListJobRuns]
+                Resource: !Sub "arn:aws:emr-serverless:${AWS::Region}:${AWS::AccountId}:/*"
+              # PassRole is constrained to the single EMR execution role ARN and
+              # may only be passed to EMR Serverless — a compromised Engine
+              # cannot pass this role to any other service (M4 / T4).
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EmrExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: emr-serverless.amazonaws.com
+        - PolicyName: Lambda
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [lambda:CreateFunction, lambda:DeleteFunction, lambda:UpdateFunctionCode, lambda:UpdateFunctionConfiguration, lambda:GetFunction, lambda:AddPermission, lambda:RemovePermission, lambda:InvokeFunction, lambda:TagResource, lambda:UntagResource]
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${EnvironmentName}-track-*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${EnvironmentName}-xtable-converter-${AWS::Region}"
+              # PassRole is constrained to the single tracker Lambda execution
+              # role ARN and may only be passed to Lambda — the Engine cannot
+              # pass this role to any other service (M4 / T4).
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt TrackingLambdaRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PLACEHOLDER — data-plane access for the Engine. Ships EMPTY (inert Deny).
+  # Customers must replace this with grants to their source data and Glue
+  # catalog after deployment. Inventory refresh and migration orchestration
+  # WILL NOT WORK until populated.
+  # See deployment guide: "Post-Deployment: Grant Data Access".
+  #
+  # Minimal permission set for this role (orchestration — read source,
+  # configure tracking, manage target catalog):
+  #   s3:GetObject, s3:ListBucket, s3:GetBucketLocation, s3:HeadObject  (source)
+  #   s3:GetBucketNotification, s3:PutBucketNotification               (tracker)
+  #   glue: Get* + CreateTable/UpdateTable/DeleteTable/CreateDatabase  (catalog)
+  # No source-data WRITE and no target-object writes are required by the
+  # engine itself (EMR/Athena perform data movement).
+  # ─────────────────────────────────────────────────────────────────────
+  EngineDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: NoSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-engine-data-access"
+      Description: >-
+        PLACEHOLDER (inert Deny) — supply SourceBucketNames at deploy time to
+        generate a least-privilege engine data-plane policy instead, or grant
+        after deployment. Inventory refresh and migrations will not work until
+        access is granted. See the deployment guide "Post-Deployment: Grant
+        Data Access" section.
+      Roles:
+        - !Ref EngineTaskRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PlaceholderReplaceMe
+            Effect: Deny
+            Action: "s3:GetObject"
+            Resource: "arn:aws:s3:::ima-placeholder-replace-me/*"
+
+  # Generated least-privilege engine data-plane policy — source read,
+  # S3 event-notification configuration on named source buckets (to wire the
+  # tracker), and scoped Glue catalog read/register. No source-data or target
+  # writes (EMR/Athena perform data movement).
+  EngineDataAccessGrantPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-engine-data-access"
+      Description: >-
+        Least-privilege engine data-plane access generated from
+        SourceBucketNames — source read, S3 notification config on named
+        source buckets, and scoped Glue catalog access.
+      Roles:
+        - !Ref EngineTaskRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SourceDataRead
+            Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket, s3:GetBucketLocation, s3:GetBucketNotification, s3:PutBucketNotification]
+            Resource:
+              !Split
+                - ","
+                - !Sub
+                    - "arn:aws:s3:::${buckets},arn:aws:s3:::${objects}"
+                    - buckets: !Join [",arn:aws:s3:::", !Ref SourceBucketNames]
+                      objects: !Join ["/*,arn:aws:s3:::", !Ref SourceBucketNames]
+            Condition:
+              !If
+                - HasSourceAccounts
+                - StringEquals:
+                    "aws:ResourceAccount": !Ref SourceAccountIds
+                - !Ref "AWS::NoValue"
+          - Sid: GlueCatalogAccess
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetTable
+              - glue:GetTables
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:BatchGetPartition
+              - glue:CreateDatabase
+              - glue:CreateTable
+              - glue:UpdateTable
+              - glue:DeleteTable
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ECS FARGATE — ENGINE
+  # ═══════════════════════════════════════════════════════════════════
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${EnvironmentName}-engine"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  EngineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/IMA/${EnvironmentName}/engine"
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt LogsEncryptionKey.Arn
+
+  # CMK used to encrypt the engine CloudWatch log group. The key policy grants
+  # the CloudWatch Logs service use of the key (scoped to this log group via the
+  # EncryptionContext condition), which is required or log delivery fails.
+  LogsEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "CMK for ${EnvironmentName} engine CloudWatch Logs encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/IMA/${EnvironmentName}/engine"
+
+  EngineTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${EnvironmentName}-engine"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref EngineCpu
+      Memory: !Ref EngineMemory
+      ExecutionRoleArn: !GetAtt EngineTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt EngineTaskRole.Arn
+      ContainerDefinitions:
+        - Name: engine
+          Image: !Ref EngineImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8001
+              Protocol: tcp
+              Name: engine-http
+          Secrets:
+            - Name: ENGINE_API_TOKEN
+              ValueFrom: !Ref EngineApiTokenSecret
+          Environment:
+            - Name: ENGINE_DB_BACKEND
+              Value: dynamodb
+            - Name: ENGINE_TRACKING_BACKEND
+              Value: dynamodb
+            - Name: ENGINE_DYNAMODB_REGION
+              Value: !Ref "AWS::Region"
+            - Name: ENGINE_PIPELINE_TABLE
+              Value: !Sub "${EnvironmentName}-pipelines-${AWS::Region}"
+            - Name: ENGINE_BATCH_TABLE
+              Value: !Sub "${EnvironmentName}-batches-${AWS::Region}"
+            - Name: ENGINE_PROGRESS_TABLE
+              Value: !Sub "${EnvironmentName}-progress-${AWS::Region}"
+            - Name: ENGINE_TRACKING_TABLE
+              Value: !Sub "${EnvironmentName}-object-tracking-${AWS::Region}"
+            - Name: ENGINE_SNAPSHOT_TABLE
+              Value: !Sub "${EnvironmentName}-snapshots-${AWS::Region}"
+            - Name: ENGINE_COSTS_TABLE
+              Value: !Sub "${EnvironmentName}-costs-${AWS::Region}"
+            - Name: ENGINE_VALIDATION_TABLE
+              Value: !Sub "${EnvironmentName}-validation-results-${AWS::Region}"
+            - Name: ENGINE_VALIDATION_WORKERS
+              Value: !Sub "${ValidationWorkers}"
+            - Name: ENGINE_RECONCILE_INTERVAL_SECONDS
+              Value: !Sub "${ReconcileIntervalSeconds}"
+            - Name: ENGINE_LOG_LEVEL
+              Value: !Ref LogLevel
+            - Name: ENGINE_ATHENA_WORKGROUP
+              Value: !Sub "${EnvironmentName}-migrations"
+            # One common logs bucket, split by prefix: athena-query-results/,
+            # emr-logs/ and migration-reports/ (see ENGINE_LOGS_BUCKET below).
+            - Name: ENGINE_LOGS_BUCKET
+              Value: !Ref LogsBucket
+            - Name: ENGINE_ATHENA_OUTPUT_LOCATION
+              Value: !Sub "s3://${LogsBucket}/athena-query-results/"
+            - Name: ENGINE_ATHENA_REGION
+              Value: !Ref "AWS::Region"
+            - Name: ENGINE_EMR_APPLICATION_ID
+              Value: !Ref EmrServerlessApp
+            - Name: ENGINE_EMR_EXECUTION_ROLE_ARN
+              Value: !GetAtt EmrExecutionRole.Arn
+            # Spark scripts are uploaded to (and read by EMR from) the dedicated
+            # ScriptsBucket — NOT the logs bucket. Without this, resolve_script_path
+            # falls back to ENGINE_EMR_LOG_URI and EMR looks for scripts under
+            # the logs bucket, failing with FileNotFoundException. The EMR role's
+            # ScriptsBucketRead grant already expects scripts to live here.
+            - Name: ENGINE_EMR_SCRIPTS_URI
+              Value: !Sub "s3://${ScriptsBucket}/scripts"
+            - Name: ENGINE_EMR_LOG_URI
+              Value: !Sub "s3://${LogsBucket}/emr-logs/"
+            - Name: ENGINE_EMR_REGION
+              Value: !Ref "AWS::Region"
+            # Managed Migration (S3 Tables Migration API): role the service
+            # assumes and bucket ARN where compatibility/migration reports land.
+            - Name: ENGINE_S3TABLES_MIGRATION_ROLE_ARN
+              Value: !GetAtt S3TablesMigrationRole.Arn
+            - Name: ENGINE_S3TABLES_REPORTS_BUCKET
+              Value: !Ref LogsBucket
+            - Name: ENGINE_TRACKING_LAMBDA_ROLE_ARN
+              Value: !GetAtt TrackingLambdaRole.Arn
+            - Name: ENGINE_TRACKING_REGION
+              Value: !Ref "AWS::Region"
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref "AWS::Region"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EngineLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: engine
+          HealthCheck:
+            Command: ["CMD-SHELL", "curl -f http://localhost:8001/api/health || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 15
+
+  ServiceDiscoveryNamespace:
+    Type: AWS::ServiceDiscovery::HttpNamespace
+    Properties:
+      Name: !Ref EnvironmentName
+
+  EngineService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub "${EnvironmentName}-engine"
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref EngineTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetB
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !GetAtt ServiceDiscoveryNamespace.Arn
+        Services:
+          - PortName: engine-http
+            DiscoveryName: engine
+            ClientAliases:
+              - Port: 8001
+                DnsName: engine.local
+
+  # ═══════════════════════════════════════════════════════════════════
+  # XTABLE LAMBDA (CONDITIONAL)
+  # ═══════════════════════════════════════════════════════════════════
+
+  XTableLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: DeployXTable
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      # Source read, target metadata write and Glue catalog access are granted
+      # post-deployment via XTableDataAccessPolicy (placeholder below). The
+      # XTable Lambda reads Hudi/Delta source metadata and writes Iceberg
+      # metadata to the target. See deployment guide "Post-Deployment: Grant
+      # Data Access".
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PLACEHOLDER — data-plane access for the XTable (Hudi/Delta->Iceberg)
+  # Lambda. Ships EMPTY (inert Deny). Customers must replace this after
+  # deployment. Morph-strategy conversions WILL NOT WORK until populated.
+  # See deployment guide "Post-Deployment: Grant Data Access".
+  # Only created when XTable is deployed (Condition: DeployXTable).
+  #
+  # Minimal permission set for this role:
+  #   s3:GetObject, s3:ListBucket, s3:HeadObject          (source read)
+  #   s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket (target write)
+  #   glue: Get* + CreateTable/UpdateTable/DeleteTable    (target catalog)
+  # ─────────────────────────────────────────────────────────────────────
+  XTableDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: DeployXTableNoBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-xtable-data-access"
+      Description: >-
+        PLACEHOLDER (inert Deny) — supply SourceBucketNames/TargetBucketNames at
+        deploy time to generate a least-privilege XTable policy instead, or grant
+        after deployment. Morph conversions will not work until access is
+        granted. See the deployment guide "Post-Deployment: Grant Data Access".
+      Roles:
+        - !Ref XTableLambdaRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PlaceholderReplaceMe
+            Effect: Deny
+            Action: "s3:GetObject"
+            Resource: "arn:aws:s3:::ima-placeholder-replace-me/*"
+
+  # Generated least-privilege XTable data-plane policy — source read,
+  # optional target metadata write, scoped Glue register. Created only when the
+  # Lambda is deployed AND source buckets are supplied.
+  XTableDataAccessGrantPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: DeployXTableWithBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-xtable-data-access"
+      Description: >-
+        Least-privilege XTable Lambda data-plane access generated from
+        SourceBucketNames/TargetBucketNames.
+      Roles:
+        - !Ref XTableLambdaRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SourceMetadataRead
+            Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket, s3:GetBucketLocation]
+            Resource:
+              !Split
+                - ","
+                - !Sub
+                    - "arn:aws:s3:::${buckets},arn:aws:s3:::${objects}"
+                    - buckets: !Join [",arn:aws:s3:::", !Ref SourceBucketNames]
+                      objects: !Join ["/*,arn:aws:s3:::", !Ref SourceBucketNames]
+            Condition:
+              !If
+                - HasSourceAccounts
+                - StringEquals:
+                    "aws:ResourceAccount": !Ref SourceAccountIds
+                - !Ref "AWS::NoValue"
+          - Sid: GlueCatalogRegister
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetTable
+              - glue:CreateTable
+              - glue:UpdateTable
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+
+  XTableLambdaFunction:
+    Type: AWS::Lambda::Function
+    Condition: DeployXTable
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-xtable-converter-${AWS::Region}"
+      PackageType: Image
+      Code:
+        ImageUri: !Ref XTableImageUri
+      Role: !GetAtt XTableLambdaRole.Arn
+      MemorySize: !Ref XTableMemorySize
+      Timeout: 300
+      Architectures: [x86_64]
+      Environment:
+        Variables:
+          SPARK_LOCAL_IP: "127.0.0.1"
+          JAVA_HOME: "/usr/lib/jvm/java-11"
+
+# ═══════════════════════════════════════════════════════════════════
+# OUTPUTS
+# ═══════════════════════════════════════════════════════════════════
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+  PrivateSubnetA:
+    Value: !Ref PrivateSubnetA
+  PrivateSubnetB:
+    Value: !Ref PrivateSubnetB
+  PublicSubnetA:
+    Value: !Ref PublicSubnetA
+  PublicSubnetB:
+    Value: !Ref PublicSubnetB
+  SecurityGroupId:
+    Value: !Ref AppSecurityGroup
+
+  EngineInternalUrl:
+    Description: Internal URL for backend to reach the engine
+    Value: "http://engine.local:8001"
+
+  EcsClusterName:
+    Value: !Ref EcsCluster
+  EngineServiceName:
+    Value: !GetAtt EngineService.Name
+
+  EmrApplicationId:
+    Value: !Ref EmrServerlessApp
+  EmrExecutionRoleArn:
+    Value: !GetAtt EmrExecutionRole.Arn
+  ScriptsBucket:
+    Value: !Ref ScriptsBucket
+  LogsBucket:
+    Value: !Ref LogsBucket
+  AthenaWorkgroup:
+    Value: !Ref AthenaWorkgroup
+
+  TrackingLambdaRoleArn:
+    Value: !GetAtt TrackingLambdaRole.Arn
+  EngineTaskRoleArn:
+    Value: !GetAtt EngineTaskRole.Arn
+  S3TablesMigrationRoleArn:
+    Description: >-
+      IAM role assumed by the S3 Tables Migration API for Managed Migration.
+      Attach a source-read data-access policy (or supply SourceBucketNames at
+      deploy time) before running managed migrations.
+    Value: !GetAtt S3TablesMigrationRole.Arn
+
+  XTableLambdaArn:
+    Condition: DeployXTable
+    Value: !GetAtt XTableLambdaFunction.Arn
+
+  ServiceConnectNamespaceArn:
+    Value: !GetAtt ServiceDiscoveryNamespace.Arn
+  EngineApiTokenSecretArn:
+    Description: Secret holding the engine API bearer token (pass to the app stack)
+    Value: !Ref EngineApiTokenSecret
+  EngineSecretsKeyArn:
+    Description: CMK that encrypts the engine API token secret (pass to the app stack)
+    Value: !GetAtt EngineSecretsEncryptionKey.Arn

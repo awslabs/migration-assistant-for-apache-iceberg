@@ -1,0 +1,900 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Migration Assistant application — Backend API + Frontend served from a single
+  ECS Fargate container behind a public ALB. Access restricted via
+  security group IP allowlisting.
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: ima
+    Description: Prefix for all resource names
+
+  ImageUri:
+    Type: String
+    Description: ECR image URI for the app container (backend serving frontend static files)
+
+  Cpu:
+    Type: String
+    Default: "512"
+    AllowedValues: ["256", "512", "1024", "2048"]
+
+  Memory:
+    Type: String
+    Default: "1024"
+    AllowedValues: ["512", "1024", "2048", "4096"]
+
+  # ─── Database ─────────────────────────────────────────────────────
+  DBMinCapacity:
+    Type: Number
+    Default: 0.5
+
+  DBMaxCapacity:
+    Type: Number
+    Default: 4
+
+  DBMasterUsername:
+    Type: String
+    Default: imaadmin
+    NoEcho: true
+
+  DBAppUsername:
+    Type: String
+    Default: ima_app
+    Description: >
+      Dedicated least-privilege application DB user. Created by the bootstrap
+      Lambda and granted rds_iam. The app connects as this user via IAM tokens.
+
+  DbBootstrapImageUri:
+    Type: String
+    Description: ECR image URI for the DB bootstrap Lambda (custom resource)
+
+  # ─── Connections ──────────────────────────────────────────────────
+  EngineUrl:
+    Type: String
+    Default: "http://engine.local:8001"
+    Description: Internal URL of the engine
+
+  ServiceConnectNamespaceArn:
+    Type: String
+    Description: ARN of the Service Connect namespace (from engine stack output)
+  EngineApiTokenSecretArn:
+    Type: String
+    Description: >
+      ARN of the Secrets Manager secret holding the engine API bearer token
+      (engine stack output EngineApiTokenSecretArn).
+  EngineSecretsKeyArn:
+    Type: String
+    Description: >
+      ARN of the KMS key that encrypts the engine API token secret
+      (engine stack output EngineSecretsKeyArn).
+
+  EngineSecurityGroupId:
+    Type: String
+    Description: >
+      Security group ID of the engine tasks (from the engine stack's
+      SecurityGroupId output). Used to allow the app to reach the engine on 8001
+      via Service Connect (engine.local:8001).
+
+  AgentUrl:
+    Type: String
+    Default: ""
+    Description: URL of the AI Agent endpoint
+
+  # ─── Notifications ────────────────────────────────────────────────
+  NotificationSenderEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Verified SES sender/"From" address for pipeline notification emails.
+      Must be verified in SES. If empty, the notification Lambda is still
+      created but will not send until this is set.
+
+  NotificationEventBusName:
+    Type: String
+    Default: "default"
+    Description: EventBridge bus name the app publishes notification events to
+
+  CorsAllowedOrigins:
+    Type: String
+    Default: ""
+    Description: >
+      Comma-separated list of allowed CORS origins for the frontend.
+      Example: https://ima.example.com,https://app.example.com
+      If empty, defaults to localhost development origins only.
+
+  # ─── Authentication ──────────────────────────────────────────
+  RequireMfa:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      When true, TOTP multi-factor authentication is mandatory for privileged
+      users (admin/editor): they must enroll a second factor before using the
+      app. Viewers are not forced. Default false (MFA remains available per-user
+      via the UI but is not enforced).
+
+  # ─── Networking ───────────────────────────────────────────────────
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet A (for ECS tasks + ALB + DB)
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet B (for ALB + DB multi-AZ)
+
+Resources:
+
+  # ═══════════════════════════════════════════════════════════════════
+  # SECURITY GROUPS
+  # ═══════════════════════════════════════════════════════════════════
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${EnvironmentName} app tasks"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 10.0.0.0/16
+          Description: App traffic from VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to AWS APIs
+      # Egress to Aurora (5432) is defined as a standalone AppEgressToDB rule
+      # below so AppSecurityGroup and DBSecurityGroup do not Ref each other
+      # (which CloudFormation rejects as a circular dependency).
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${EnvironmentName} Aurora DB"
+      VpcId: !Ref VpcId
+      # Ingress from the app (5432) is defined as a standalone DBIngressFromApp
+      # rule below to avoid a circular dependency with AppSecurityGroup.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS for Aurora enhanced monitoring
+
+  # Standalone App↔DB rules — neither security group references the other, so
+  # there is no creation-time cycle (same pattern as DBIngressFromBootstrap).
+  AppEgressToDB:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref DBSecurityGroup
+      Description: PostgreSQL to Aurora
+
+  DBIngressFromApp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+      Description: PostgreSQL from app tasks
+
+  # App reaches the engine on 8001 via Service Connect
+  # (engine.local:8001). Scoped SG-to-SG using the engine stack's
+  # SecurityGroupId output (passed in as EngineSecurityGroupId).
+  AppEgressToEngine:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8001
+      ToPort: 8001
+      DestinationSecurityGroupId: !Ref EngineSecurityGroupId
+      Description: App to the engine (Service Connect)
+
+  DbBootstrapSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${EnvironmentName} DB bootstrap Lambda"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to AWS APIs (Secrets Manager)
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref DBSecurityGroup
+          Description: PostgreSQL to Aurora
+
+  # Allow the bootstrap Lambda to reach Aurora (separate rule to avoid a
+  # circular dependency between the two security groups)
+  DBIngressFromBootstrap:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref DbBootstrapSecurityGroup
+      Description: PostgreSQL from DB bootstrap Lambda
+
+  # ═══════════════════════════════════════════════════════════════════
+  # DATABASE — AURORA POSTGRESQL SERVERLESS V2
+  # ═══════════════════════════════════════════════════════════════════
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${EnvironmentName} DB subnets"
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+  # ─── KMS Key for Secrets ────────────────────────────────────────────
+  SecretsEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "CMK for ${EnvironmentName} Secrets Manager encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  # ─── Secrets Manager ───────────────────────────────────────────────
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${EnvironmentName}/app/db-credentials"
+      Description: Aurora PostgreSQL master credentials
+      KmsKeyId: !Ref SecretsEncryptionKey
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DBMasterUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  # One-time bootstrap password for the seeded `admin` account. The value
+  # is generated inside Secrets Manager (never in the template or logs), injected
+  # into the app container via ECS Secrets, and read once at init_db() to seed
+  # the admin user. The account is flagged must_change_password=1, so this is
+  # only ever a first-login credential — the operator retrieves it from Secrets
+  # Manager, logs in, and is immediately forced to set a new password.
+  BootstrapAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${EnvironmentName}/app/bootstrap-admin-password"
+      Description: One-time first-login password for the seeded admin user
+      KmsKeyId: !Ref SecretsEncryptionKey
+      GenerateSecretString:
+        # Store as a JSON object with a `password` key so ECS Secrets can select
+        # the field by JSON key.
+        SecretStringTemplate: '{}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludePunctuation: true
+
+  # Update secret with actual endpoint after cluster creation
+  DBSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DBSecret
+      TargetId: !Ref DBCluster
+      TargetType: AWS::RDS::DBCluster
+
+  DBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier: !Sub "${EnvironmentName}-app-db-${AWS::Region}"
+      Engine: aurora-postgresql
+      EngineVersion: "16.13"
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:password}}"
+      DatabaseName: ima
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: !Ref DBMinCapacity
+        MaxCapacity: !Ref DBMaxCapacity
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+      StorageEncrypted: true
+      EnableIAMDatabaseAuthentication: true
+      DeletionProtection: true
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceClass: db.serverless
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+
+  # ═══════════════════════════════════════════════════════════════════
+  # DB BOOTSTRAP — provisions the dedicated IAM-auth application user
+  # ═══════════════════════════════════════════════════════════════════
+
+  DbBootstrapLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Required for a Lambda that runs inside a VPC (manage ENIs)
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DbBootstrapPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadMasterSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DBSecret
+              - Sid: DecryptSecret
+                Effect: Allow
+                Action: [kms:Decrypt, kms:DescribeKey]
+                Resource: !GetAtt SecretsEncryptionKey.Arn
+
+  DbBootstrapLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-db-bootstrap"
+      PackageType: Image
+      Code:
+        ImageUri: !Ref DbBootstrapImageUri
+      Role: !GetAtt DbBootstrapLambdaRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref DbBootstrapSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+
+  # Custom resource — invokes the bootstrap Lambda once on create/update.
+  # DependsOn the DB instance so the cluster is accepting connections, and the
+  # secret attachment so the secret has the host/port populated.
+  DbBootstrap:
+    Type: Custom::DbBootstrap
+    DependsOn:
+      - DBInstance
+      - DBSecretAttachment
+      - DBIngressFromBootstrap
+    Properties:
+      ServiceToken: !GetAtt DbBootstrapLambda.Arn
+      DBSecretArn: !Ref DBSecret
+      DBHost: !GetAtt DBCluster.Endpoint.Address
+      DBPort: "5432"
+      DBName: ima
+      AppUser: !Ref DBAppUsername
+      Region: !Ref "AWS::Region"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ALB (PUBLIC)
+  # ═══════════════════════════════════════════════════════════════════
+
+  # ═══════════════════════════════════════════════════════════════════
+  # JUMPHOST — SSM-accessible EC2 for port-forwarding to private services
+  # ═══════════════════════════════════════════════════════════════════
+
+  JumphostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${EnvironmentName} jumphost (SSM only, no inbound)"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS for SSM agent
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          DestinationSecurityGroupId: !Ref AppSecurityGroup
+          Description: SSM port-forward to the App UI/API
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref DBSecurityGroup
+          Description: PostgreSQL to Aurora for admin access
+
+  JumphostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  JumphostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref JumphostRole
+
+  Jumphost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t4g.micro
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}"
+      IamInstanceProfile: !Ref JumphostInstanceProfile
+      SubnetId: !Ref PrivateSubnetA
+      SecurityGroupIds:
+        - !Ref JumphostSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-jumphost"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # ECS FARGATE — APP (BACKEND + FRONTEND)
+  # ═══════════════════════════════════════════════════════════════════
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${EnvironmentName}-app"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # CMK used to encrypt the app CloudWatch log group. The key policy grants the
+  # CloudWatch Logs service permission to use it (scoped to this account's log
+  # groups via the EncryptionContext condition), which is required or log
+  # delivery fails.
+  LogsEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "CMK for ${EnvironmentName} app CloudWatch Logs encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/IMA/${EnvironmentName}/app"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/IMA/${EnvironmentName}/app"
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt LogsEncryptionKey.Arn
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        # ECS injects the bootstrap-admin password via the container `Secrets`
+        # block; the EXECUTION role (not the task role) must be able to read the
+        # secret and decrypt it with the CMK at task start.
+        - PolicyName: ReadBootstrapAdminSecret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadBootstrapAdminSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref BootstrapAdminSecret
+              - Sid: ReadEngineApiToken
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref EngineApiTokenSecretArn
+              - Sid: DecryptEngineApiToken
+                Effect: Allow
+                Action: [kms:Decrypt, kms:DescribeKey]
+                Resource: !Ref EngineSecretsKeyArn
+              - Sid: DecryptBootstrapAdminSecret
+                Effect: Allow
+                Action: [kms:Decrypt, kms:DescribeKey]
+                Resource: !GetAtt SecretsEncryptionKey.Arn
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ─── Bedrock (AI Agent) ──────────────────────────────────────
+              - Sid: Bedrock
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock-agentcore:InvokeAgentRuntime
+                Resource: "*"
+              # ─── EventBridge (pipeline status notifications) ─────────────
+              - Sid: EventBridgePutEvents
+                Effect: Allow
+                Action: events:PutEvents
+                Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default"
+              # ─── RDS IAM Auth (dedicated app user only) ──────────────────
+              - Sid: RdsIamAuth
+                Effect: Allow
+                Action: rds-db:connect
+                Resource: !Sub "arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:${DBCluster.DBClusterResourceId}/${DBAppUsername}"
+              # ─── Glue Data Catalog access is granted post-deployment via
+              #     AppDataAccessPolicy (placeholder below). The App only READS
+              #     the catalog for inventory/source refresh — see deployment
+              #     guide "Post-Deployment: Grant Data Access". ───────────────
+              # ─── CloudWatch Logs (container logging already via execution
+              #     role, but task may push custom metrics) ──────────────────
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt LogGroup.Arn
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PLACEHOLDER — Glue catalog access for the App backend. Ships EMPTY
+  # (inert Deny). Customers must replace this with READ-ONLY Glue grants
+  # after deployment. Inventory / source refresh WILL NOT WORK until
+  # populated. See deployment guide "Post-Deployment: Grant Data Access".
+  #
+  # Minimal permission set for this role (catalog READ only — the App never
+  # reads object data and never writes the catalog):
+  #   glue:GetDatabases, glue:GetDatabase, glue:GetTables, glue:GetTable,
+  #   glue:GetPartitions, glue:GetPartition, glue:BatchGetPartition
+  # ─────────────────────────────────────────────────────────────────────
+  # Least-privilege READ-ONLY access to the App's own-account Glue catalog for
+  # inventory/source refresh. Scoped to this account+region catalog only —
+  # no wildcard account/region, no write actions. Cross-account source catalogs
+  # are read via the per-source assumed IAM role (SourceInfo.iam_role_arn), not
+  # this policy, so this does not need to be broad.
+  AppDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-app-data-access"
+      Description: >-
+        READ-ONLY own-account Glue Data Catalog access for the App backend
+        inventory/source refresh (least privilege). Cross-account sources
+        are read via per-source assumed roles.
+      Roles:
+        - !Ref TaskRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: OwnAccountGlueRead
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetTable
+              - glue:GetTables
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:BatchGetPartition
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${EnvironmentName}-app"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref ImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: DB_TYPE
+              Value: aurora
+            - Name: DB_HOST
+              Value: !GetAtt DBCluster.Endpoint.Address
+            - Name: DB_PORT
+              Value: "5432"
+            - Name: DB_NAME
+              Value: ima
+            - Name: DB_USER
+              Value: !Ref DBAppUsername
+            - Name: DB_REGION
+              Value: !Ref "AWS::Region"
+            - Name: ENGINE_URL
+              Value: !Ref EngineUrl
+            - Name: AGENT_URL
+              Value: !Ref AgentUrl
+            - Name: CORS_ALLOWED_ORIGINS
+              Value: !Ref CorsAllowedOrigins
+            # ─── Session auth ───────────────────────────────────
+            # Sessions are opaque server-side tokens stored (hashed) in the DB
+            # and delivered as an HttpOnly cookie. No signing secret is needed,
+            # so there is nothing to inject from Secrets Manager here.
+            # Secure=true requires the app to be served over HTTPS (it is,
+            # behind the load balancer); SameSite=strict is the CSRF defense.
+            - Name: SESSION_COOKIE_SECURE
+              Value: "true"
+            - Name: SESSION_COOKIE_SAMESITE
+              Value: strict
+            - Name: SESSION_ABSOLUTE_TTL
+              Value: "28800"   # 8 hours — hard cap on session lifetime
+            - Name: SESSION_IDLE_TTL
+              Value: "1800"    # 30 minutes — sliding idle timeout
+            # ─── MFA enforcement ─────────────────────────────────────
+            # When "true", admin/editor users must enroll TOTP before use.
+            - Name: APP_REQUIRE_MFA
+              Value: !Ref RequireMfa
+          # The one-time bootstrap admin password is injected from Secrets
+          # Manager rather than an env literal, so it never appears in the task
+          # definition or CloudWatch. Read once at init_db() to seed the admin
+          # account (which is force-flagged must_change_password).
+          Secrets:
+            - Name: APP_BOOTSTRAP_ADMIN_PASSWORD
+              ValueFrom: !Sub "${BootstrapAdminSecret}:password::"
+            - Name: ENGINE_API_TOKEN
+              ValueFrom: !Ref EngineApiTokenSecretArn
+          # Database auth is IAM-only — the app uses short-lived IAM tokens via
+          # the task role's rds-db:connect permission. No DB password is injected.
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: app
+          HealthCheck:
+            Command: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+
+  AppService:
+    Type: AWS::ECS::Service
+    # Wait for the app DB user (ima_app) to exist + have rds_iam before the
+    # app starts, so its first IAM-auth connection succeeds.
+    DependsOn: DbBootstrap
+    Properties:
+      ServiceName: !Sub "${EnvironmentName}-app"
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetB
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Ref ServiceConnectNamespaceArn
+
+  # ═══════════════════════════════════════════════════════════════════
+  # NOTIFICATIONS — EventBridge rule → Lambda → SES per-recipient email
+  # ═══════════════════════════════════════════════════════════════════
+
+  NotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: NotificationLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${EnvironmentName}-notification-sender:*"
+              - Sid: SesSend
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"
+
+  NotificationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${EnvironmentName}-notification-sender"
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt NotificationLambdaRole.Arn
+      Environment:
+        Variables:
+          SENDER_EMAIL: !Ref NotificationSenderEmail
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+
+          ses = boto3.client("ses")
+          SENDER = os.environ.get("SENDER_EMAIL", "")
+
+          # Human-readable subject lines per event type
+          SUBJECTS = {
+              "pipeline_completed": "Migration completed: {source}",
+              "pipeline_failed": "Migration FAILED: {source}",
+              "sync_out_of_sync": "Migration out of sync: {source}",
+              "plan_completed": "Migration plan completed: {plan}",
+          }
+
+          def _body(detail):
+              event_type = detail.get("event_type", "")
+              lines = [
+                  f"Event: {event_type}",
+                  f"Plan: {detail.get('plan_name', '')} ({detail.get('plan_id', '')})",
+              ]
+              if detail.get("source_table"):
+                  lines.append(
+                      f"Table: {detail.get('source_database','')}.{detail.get('source_table','')}"
+                      f" -> {detail.get('target_database','')}.{detail.get('target_table','')}")
+                  lines.append(f"Migration type: {detail.get('migration_type','')}")
+                  lines.append(f"Status: {detail.get('old_status','')} -> {detail.get('new_status','')}")
+              if detail.get("error_message"):
+                  lines.append(f"Error: {detail['error_message']}")
+              lines.append(f"Time: {detail.get('timestamp','')}")
+              return "\n".join(lines)
+
+          def handler(event, context):
+              detail = event.get("detail", {})
+              event_type = detail.get("event_type", "")
+              recipients = detail.get("recipients", [])
+
+              if not SENDER:
+                  print("SENDER_EMAIL not configured; skipping send")
+                  return {"sent": 0, "reason": "no sender configured"}
+              if not recipients:
+                  print("No recipients in event; nothing to send")
+                  return {"sent": 0, "reason": "no recipients"}
+
+              subject_tmpl = SUBJECTS.get(event_type, "Migration Assistant for Apache Iceberg: migration update")
+              subject = subject_tmpl.format(
+                  source=detail.get("source_table", ""),
+                  plan=detail.get("plan_name", ""))
+              body = _body(detail)
+
+              sent = 0
+              for r in recipients:
+                  email = r.get("email", "")
+                  if not email:
+                      continue
+                  try:
+                      ses.send_email(
+                          Source=SENDER,
+                          Destination={"ToAddresses": [email]},
+                          Message={
+                              "Subject": {"Data": subject},
+                              "Body": {"Text": {"Data": body}},
+                          })
+                      sent += 1
+                  except Exception as e:
+                      print(f"Failed to send to {email}: {e}")
+
+              print(f"Sent {sent}/{len(recipients)} notification emails for {event_type}")
+              return {"sent": sent, "total": len(recipients)}
+
+  NotificationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${EnvironmentName}-migration-notifications"
+      EventBusName: !Ref NotificationEventBusName
+      EventPattern:
+        source:
+          - IMA.migrations
+      Targets:
+        - Id: notification-lambda
+          Arn: !GetAtt NotificationLambda.Arn
+
+  NotificationLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NotificationLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NotificationRule.Arn
+
+Outputs:
+  DatabaseEndpoint:
+    Description: Aurora PostgreSQL endpoint
+    Value: !GetAtt DBCluster.Endpoint.Address
+
+  NotificationLambdaArn:
+    Description: ARN of the notification sender Lambda
+    Value: !GetAtt NotificationLambda.Arn
+
+  NotificationRuleArn:
+    Description: ARN of the EventBridge notification rule
+    Value: !GetAtt NotificationRule.Arn
+
+  EcsClusterName:
+    Value: !Ref EcsCluster
+
+  AppServiceName:
+    Value: !GetAtt AppService.Name
+
+  JumphostInstanceId:
+    Description: Instance ID for SSM port-forwarding
+    Value: !Ref Jumphost

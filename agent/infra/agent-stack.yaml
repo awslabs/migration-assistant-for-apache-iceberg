@@ -1,0 +1,304 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Migration Assistant AI agent — IAM role and artifacts bucket for
+  Bedrock AgentCore deployment (via agentcore CLI).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ima
+    Description: Prefix for all resource names
+
+  # ─── Data-plane access (least-privilege, parameterized) ───────────────
+  # Supply the agent's source buckets to generate a tightly-scoped READ-ONLY
+  # policy (specific bucket ARNs + optional aws:ResourceAccount guard) instead
+  # of an inert placeholder. Leave empty to ship the safe inert-Deny default.
+  SourceBucketNames:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      Source S3 bucket names the agent may READ for analysis (no arn: prefix, no
+      wildcards). Leave empty for the inert placeholder.
+
+  SourceAccountIds:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      AWS account IDs owning the source data, used as an aws:ResourceAccount
+      guard. Leave empty to skip the guard.
+
+Conditions:
+  HasSourceBuckets: !Not [!Equals [!Join ["", !Ref SourceBucketNames], ""]]
+  NoSourceBuckets: !Equals [!Join ["", !Ref SourceBucketNames], ""]
+  HasSourceAccounts: !Not [!Equals [!Join ["", !Ref SourceAccountIds], ""]]
+
+Resources:
+
+  # ─── IAM Role for Agent Execution ─────────────────────────────────
+  # AgentCore attaches this role to the agent runtime.
+  # Deploy the agent runtime with: agentcore deploy
+  AgentExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AssumeRolePolicy
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockModelAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:aws:bedrock:*::foundation-model/*"
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - Effect: Allow
+                Action:
+                  - bedrock:GetInferenceProfile
+                  - bedrock:ListInferenceProfiles
+                  - bedrock:UseInferenceProfile
+                Resource:
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                  - "arn:aws:bedrock:*::foundation-model/*"
+
+        # Glue catalog and S3 source-data READ access is granted post-
+        # deployment via AgentDataAccessPolicy (placeholder below). The agent
+        # only READS source tables/data to produce recommendations — see
+        # deployment guide "Post-Deployment: Grant Data Access".
+
+        - PolicyName: CloudTrailReadAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudtrail:LookupEvents
+                Resource: "*"
+
+        # Runtime logs. AgentCore writes the agent's stdout/stderr to
+        # /aws/bedrock-agentcore/runtimes/<runtime-id>-<endpoint> using this
+        # role; without these the log group is never created and runtime
+        # errors (e.g. a model access failure) are invisible.
+        - PolicyName: AgentCoreRuntimeLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+
+      Tags:
+        - Key: IMA:component
+          Value: agent
+        - Key: IMA:environment
+          Value: !Ref EnvironmentName
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PLACEHOLDER — Glue catalog + S3 source-data access for the AI agent.
+  # Ships EMPTY (inert Deny). Customers must replace this with READ-ONLY
+  # grants after deployment. Table analysis / recommendations WILL NOT WORK
+  # until populated. See deployment guide "Post-Deployment: Grant Data Access".
+  #
+  # Minimal permission set for this role (READ ONLY — the agent never writes
+  # data or the catalog):
+  #   glue:GetTable, glue:GetTables, glue:GetDatabase, glue:GetDatabases,
+  #   glue:GetPartitions, glue:GetPartition, glue:GetColumnStatisticsForTable
+  #   s3:GetObject, s3:ListBucket, s3:GetBucketLocation, s3:HeadObject
+  # ─────────────────────────────────────────────────────────────────────
+  AgentDataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: NoSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-agent-data-access"
+      Description: >-
+        PLACEHOLDER (inert Deny) — supply SourceBucketNames at deploy time to
+        generate a least-privilege READ-ONLY policy instead, or grant after
+        deployment. Table analysis will not work until access is granted. See
+        the deployment guide "Post-Deployment: Grant Data Access" section.
+      Roles:
+        - !Ref AgentExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PlaceholderReplaceMe
+            Effect: Deny
+            Action: "s3:GetObject"
+            Resource: "arn:aws:s3:::ima-placeholder-replace-me/*"
+
+  # Generated least-privilege READ-ONLY data access for the agent (T1) — named
+  # source buckets and scoped Glue read only; the agent never writes.
+  AgentDataAccessGrantPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: HasSourceBuckets
+    Properties:
+      ManagedPolicyName: !Sub "${EnvironmentName}-agent-data-access"
+      Description: >-
+        Least-privilege READ-ONLY Glue + S3 source access for the Migration Assistant AI
+        agent generated from SourceBucketNames (T1).
+      Roles:
+        - !Ref AgentExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SourceDataRead
+            Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket, s3:GetBucketLocation]
+            Resource:
+              !Split
+                - ","
+                - !Sub
+                    - "arn:aws:s3:::${buckets},arn:aws:s3:::${objects}"
+                    - buckets: !Join [",arn:aws:s3:::", !Ref SourceBucketNames]
+                      objects: !Join ["/*,arn:aws:s3:::", !Ref SourceBucketNames]
+            Condition:
+              !If
+                - HasSourceAccounts
+                - StringEquals:
+                    "aws:ResourceAccount": !Ref SourceAccountIds
+                - !Ref "AWS::NoValue"
+          - Sid: GlueCatalogRead
+            Effect: Allow
+            Action:
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:GetTable
+              - glue:GetTables
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:GetColumnStatisticsForTable
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*"
+
+  # ─── S3 Bucket for Agent Artifacts ────────────────────────────────
+  AgentArtifactsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-agent-artifacts-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AgentLogsBucket
+        LogFilePrefix: s3-access-logs/
+      Tags:
+        - Key: IMA:component
+          Value: agent
+
+  AgentLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-agent-logs-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Self-log into this same bucket under a dedicated prefix. DestinationBucketName
+      # is omitted deliberately: CloudFormation defaults it to THIS bucket, so there is
+      # no self-!Ref and therefore no circular dependency. The access-log objects fall
+      # under the ExpireAccessLogs lifecycle rule.
+      LoggingConfiguration:
+        LogFilePrefix: s3-access-logs/agent-logs/
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags:
+        - Key: IMA:component
+          Value: agent
+
+  # ─── CloudWatch Log Group ──────────────────────────────────────────
+  # CMK used to encrypt the agent CloudWatch log group. The key policy grants
+  # the CloudWatch Logs service use of the key (scoped to this log group via the
+  # EncryptionContext condition), which is required or log delivery fails.
+  LogsEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "CMK for ${EnvironmentName} agent CloudWatch Logs encryption"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/IMA/${EnvironmentName}/agent"
+
+  AgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/IMA/${EnvironmentName}/agent"
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt LogsEncryptionKey.Arn
+      Tags:
+        - Key: IMA:component
+          Value: agent
+
+Outputs:
+  AgentExecutionRoleArn:
+    Description: ARN of the agent execution role (use with agentcore configure)
+    Value: !GetAtt AgentExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AgentRoleArn"
+
+  AgentArtifactsBucketName:
+    Description: S3 bucket for agent code artifacts
+    Value: !Ref AgentArtifactsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactsBucket"

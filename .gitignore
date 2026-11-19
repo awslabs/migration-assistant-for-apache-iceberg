@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Backups and caches
+*.bak
+*.bak-*
+.pytest_cache/
+.ruff_cache/
+
+# SQLite databases
+*.db
+*.db.*
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local-dev bootstrap admin password (generated one-time secret; never commit)
+bootstrap-admin-password.txt
+
+# Environment
+.env
+.env.*
+
+# Bedrock AgentCore (contains account IDs, ARNs, session IDs)
+.bedrock_agentcore.yaml
+.bedrock_agentcore.yaml.*
+.bedrock_agentcore/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+app/client/dist/
+
+
+
+# Runtime logs
+engine.log

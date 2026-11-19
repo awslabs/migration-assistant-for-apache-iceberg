@@ -1,0 +1,90 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Migration eligibility rules by table format.
+#
+# rewrite     - Full data copy into new Iceberg tables. Works with any format.
+# incremental - Migrates data in batches over time, minimizing downtime.
+#               Supported for columnar formats only.
+# morph       - Transforms to Iceberg by tracking files and generating
+#               manifests dynamically. No data movement. Supported only
+#               for columnar formats (Parquet, Hudi, Delta).
+#
+# Changes take effect on next API call (no restart needed).
+
+formats:
+  csv:
+    - rewrite
+  json:
+    - rewrite
+  avro:
+    - rewrite
+  orc:
+    - rewrite
+  parquet:
+    - rewrite
+    - incremental
+    - morph
+    - add_files
+    # Managed Migration (AWS S3 Tables Migration API). Parquet-only, and only
+    # valid with an S3 Tables target — the target gate is enforced in
+    # plan_service (format eligibility alone cannot express the target constraint).
+    - s3tables_managed
+  hudi:
+    - rewrite
+    - incremental
+    - morph
+  delta:
+    - rewrite
+    - incremental
+    - morph
+  iceberg:
+    - rewrite
+    - incremental
+
+# Schema evolution rules — type promotions and compatibility.
+#
+# safe_promotions: Type changes that Iceberg supports without data loss.
+# Each entry is [source_iceberg_type, target_iceberg_type].
+#
+# decimal_rules: Constraints for decimal type handling.
+#
+# timestamp_rules: How to handle timezone ambiguity during migration.
+
+type_evolution:
+  safe_promotions:
+    - [int, long]
+    - [float, double]
+    - [date, timestamp]
+    - [timestamp, timestamptz]
+
+  decimal_rules:
+    max_precision: 38
+    max_scale: 38
+    # Widening (increasing precision/scale) is always safe
+    allow_widening: true
+    # Narrowing requires explicit confirmation
+    allow_narrowing: false
+    # Default precision/scale when source has bare 'decimal' with no params
+    default_precision: 38
+    default_scale: 18
+
+  timestamp_rules:
+    # How to map Hive 'timestamp' (which has no timezone concept)
+    # Options: timestamp (no tz), timestamptz (assume UTC), infer (use heuristics)
+    default_mapping: infer
+    # Heuristics for inference:
+    # - Check table parameters for isAdjustedToUTC or spark.sql.session.timeZone
+    # - Check column name for _utc, _tz suffixes
+    # - Fall back to 'timestamp' (no timezone) if no signal found
+    infer_from_parameters: true
+    infer_from_column_name: true
+
+  nested_type_rules:
+    # Struct fields are mapped recursively
+    # New fields in nested structs are treated as column additions (nullable)
+    allow_struct_field_addition: true
+    # Dropping struct fields is allowed but data in files is preserved
+    allow_struct_field_removal: true
+    # Type changes within structs follow the same promotion rules
+    apply_promotion_rules_to_nested: true

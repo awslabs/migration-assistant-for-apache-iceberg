@@ -1,0 +1,95 @@
+# Pull-request checks: version consistency, app server tests, frontend build,
+# Python syntax and CloudFormation lint.
+#
+# No secrets and no cloud credentials are used. The trigger is `pull_request`
+# (never `pull_request_target`), so a fork PR runs with a read-only token.
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Least privilege: read-only token, and no job requests more.
+permissions:
+  contents: read
+
+# Supersede in-progress runs for the same PR; never cancel a run on main.
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Every package manifest must match the repo-root VERSION file.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version drift
+        run: python3 scripts/sync_version.py --check
+
+  server-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run app server tests
+        working-directory: app/server
+        env:
+          # Some tests call the engine proxy; point it at a closed port so the
+          # result never depends on an engine running on the machine.
+          ENGINE_URL: "http://127.0.0.1:9"
+        run: uv run --group test pytest -q
+
+  client-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Keep in step with .mise.toml.
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/client/package-lock.json
+      - name: Install dependencies
+        working-directory: app/client
+        run: npm ci
+      - name: Type-check and build
+        working-directory: app/client
+        run: npm run build
+
+  # Syntax check for the engine, agent and app server (the engine and agent
+  # have no unit tests yet).
+  python-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile all Python sources
+        run: python -m compileall -q engine/src engine/infra agent/src app/server/app scripts
+
+  cfn-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+      # Errors fail the job. Warnings are reported but do not fail it.
+      - name: Lint CloudFormation templates
+        run: >
+          cfn-lint --non-zero-exit-code error
+          engine/infra/engine-stack.yaml
+          app/infra/app-stack.yaml
+          agent/infra/agent-stack.yaml

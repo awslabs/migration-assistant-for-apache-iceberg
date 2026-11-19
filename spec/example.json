@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "source": {
+    "database": "analytics",
+    "table_name": "user_events",
+    "format": "parquet",
+    "location": "s3://data-lake-prod/analytics/user_events/",
+    "aws_account_id": "111222333444",
+    "region": "us-east-1",
+    "catalog": "glue",
+    "partitioned": true,
+    "partition_keys": [
+      {
+        "name": "event_date",
+        "type": "string"
+      }
+    ],
+    "compression": "snappy"
+  },
+  "target": {
+    "type": "s3_tables",
+    "database": "analytics_iceberg",
+    "table_name": "user_events",
+    "table_bucket_arn": "arn:aws:s3tables:us-east-1:111222333444:bucket/iceberg-tables",
+    "catalog": "glue",
+    "aws_account_id": "111222333444",
+    "region": "us-east-1"
+  },
+  "strategy": {
+    "type": "incremental",
+    "execution_engine": "emr_serverless",
+    "iam_role_arn": "arn:aws:iam::111222333444:role/IMAExecutionRole"
+  },
+  "iceberg_properties": {
+    "partition_spec": [
+      {
+        "source_column": "event_date",
+        "transform": "day"
+      }
+    ],
+    "sort_order": [
+      {
+        "column": "user_id",
+        "direction": "asc"
+      },
+      {
+        "column": "event_timestamp",
+        "direction": "asc"
+      }
+    ],
+    "schema_overrides": [
+      {
+        "source_column": "event_id",
+        "target_type": "string"
+      },
+      {
+        "source_column": "amount",
+        "target_type": "decimal(18,2)"
+      }
+    ],
+    "table_properties": {
+      "format-version": "2",
+      "write.parquet.compression-codec": "zstd",
+      "write.metadata.delete-after-commit.enabled": "true",
+      "write.metadata.previous-versions-max": "10"
+    }
+  }
+}

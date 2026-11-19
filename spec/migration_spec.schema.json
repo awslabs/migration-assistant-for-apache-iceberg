@@ -1,0 +1,319 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MigrationSpec",
+  "description": "Common specification for an Iceberg table migration.",
+  "type": "object",
+  "required": [
+    "version",
+    "source",
+    "target",
+    "strategy"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "database",
+        "table_name",
+        "format",
+        "location",
+        "aws_account_id"
+      ],
+      "properties": {
+        "database": {
+          "type": "string"
+        },
+        "table_name": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "csv",
+            "json",
+            "avro",
+            "orc",
+            "parquet",
+            "hudi",
+            "delta",
+            "iceberg"
+          ]
+        },
+        "location": {
+          "type": "string",
+          "description": "S3 URI of source data"
+        },
+        "aws_account_id": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string",
+          "default": "us-east-1"
+        },
+        "catalog": {
+          "type": "string",
+          "default": "glue"
+        },
+        "partitioned": {
+          "type": "boolean",
+          "default": false
+        },
+        "partition_keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            }
+          },
+          "default": []
+        },
+        "compression": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "type",
+        "database",
+        "table_name"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "s3_tables",
+            "s3_iceberg"
+          ]
+        },
+        "database": {
+          "type": "string",
+          "description": "Target database/schema name or namespace for s3_tables"
+        },
+        "table_name": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string",
+          "description": "Target S3 location (required for s3_iceberg)"
+        },
+        "table_bucket_arn": {
+          "type": "string",
+          "description": "S3 Tables bucket ARN (required for s3_tables)"
+        },
+        "catalog": {
+          "type": "string",
+          "default": "glue"
+        },
+        "aws_account_id": {
+          "type": "string",
+          "default": ""
+        },
+        "region": {
+          "type": "string",
+          "default": "us-east-1"
+        }
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "rewrite",
+            "incremental",
+            "morph",
+            "add_files",
+            "s3tables_managed"
+          ]
+        },
+        "execution_engine": {
+          "type": "string",
+          "enum": [
+            "emr_serverless",
+            "athena"
+          ],
+          "default": "athena",
+          "description": "Compute engine for rewrite/incremental strategies"
+        },
+        "iam_role_arn": {
+          "type": "string",
+          "default": ""
+        },
+        "batch_size": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 1,
+          "description": "Number of partitions per batch during incremental initial load"
+        },
+        "sync_interval": {
+          "type": "integer",
+          "default": 3600,
+          "minimum": 1,
+          "description": "Seconds between sync cycles (incremental)"
+        },
+        "swap_tables": {
+          "type": "boolean",
+          "default": false,
+          "description": "Swap the target table into the source location after migration"
+        },
+        "unmatched_source_fields_policy": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "drop"
+          ],
+          "default": "fail",
+          "description": "s3tables_managed: how to handle source fields with no matching target column"
+        },
+        "incompatible_values_policy": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "setNull"
+          ],
+          "default": "fail",
+          "description": "s3tables_managed: how to handle source values that cannot be represented in the target type"
+        },
+        "athena": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Optional Athena overrides (region, workgroup, output_location)"
+        },
+        "emr": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Optional EMR Serverless overrides (application_id, execution_role_arn, region)"
+        }
+      }
+    },
+    "iceberg_properties": {
+      "type": "object",
+      "properties": {
+        "partition_spec": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "source_column",
+              "transform"
+            ],
+            "properties": {
+              "source_column": {
+                "type": "string"
+              },
+              "transform": {
+                "type": "string",
+                "enum": [
+                  "identity",
+                  "year",
+                  "month",
+                  "day",
+                  "hour",
+                  "bucket",
+                  "truncate",
+                  "void"
+                ]
+              },
+              "num_buckets": {
+                "type": "integer"
+              },
+              "width": {
+                "type": "integer"
+              }
+            }
+          },
+          "default": []
+        },
+        "sort_order": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "column"
+            ],
+            "properties": {
+              "column": {
+                "type": "string"
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "asc",
+                  "desc"
+                ],
+                "default": "asc"
+              },
+              "null_order": {
+                "type": "string",
+                "enum": [
+                  "nulls_first",
+                  "nulls_last"
+                ],
+                "default": "nulls_last"
+              }
+            }
+          },
+          "default": []
+        },
+        "schema_overrides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "source_column",
+              "target_type"
+            ],
+            "properties": {
+              "source_column": {
+                "type": "string"
+              },
+              "target_type": {
+                "type": "string"
+              },
+              "target_name": {
+                "type": "string"
+              }
+            }
+          },
+          "default": []
+        },
+        "table_properties": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {
+            "format-version": "2",
+            "write.parquet.compression-codec": "zstd"
+          }
+        }
+      },
+      "default": {}
+    }
+  }
+}
