@@ -235,13 +235,16 @@ Cost estimates for running the Migration Assistant in production (`us-east-1`). 
 
 Versions follow [Semantic Versioning](https://semver.org). The current version is in [`VERSION`](VERSION), and every package manifest must match it: `python3 scripts/sync_version.py --check` verifies this (CI runs it), and `python3 scripts/sync_version.py` fixes any drift.
 
-Each release is a [GitHub Release](../../releases) tagged `vX.Y.Z` on `main`. Release notes have two sections, **Features** and **Enhancements/Bug Fixes**, with a bold one-line headline for each item.
+Changes are recorded in [`CHANGELOG.md`](CHANGELOG.md), in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. Each pull request with a user-visible change adds an entry under `Unreleased`.
+
+Each release is a [GitHub Release](../../releases) with an annotated `vX.Y.Z` tag on `main`. Its notes are the version's section of `CHANGELOG.md`.
 
 To cut a release:
 
-1. Edit `VERSION`, run `python3 scripts/sync_version.py`, and commit the result.
-2. Merge to `main` once the checks pass.
-3. Create a draft GitHub Release for the new `vX.Y.Z` tag targeting `main`, review the notes, then publish it.
+1. On a `release/vX.Y.Z` branch, edit `VERSION` and run `python3 scripts/sync_version.py`. In `CHANGELOG.md`, rename `Unreleased` to `[X.Y.Z] - YYYY-MM-DD` and add a new empty `Unreleased` section above it.
+2. Open a pull request titled `chore(release): vX.Y.Z` and merge it once the checks pass.
+3. Tag the merge commit: `git tag -a vX.Y.Z -m "vX.Y.Z" <commit>` and push the tag.
+4. Create a GitHub Release from the tag, with the version's `CHANGELOG.md` section as the notes, and publish it.
 
 ## Contributing
 

@@ -1,0 +1,36 @@
+# Groups GitHub's generated release notes by PR label. The headings match
+# CHANGELOG.md (Keep a Changelog). Use the generated notes to check the
+# CHANGELOG section for a release; the CHANGELOG is what gets published.
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+    - title: Added
+      labels:
+        - feature
+    - title: Changed
+      labels:
+        - enhancement
+        - documentation
+    - title: Deprecated
+      labels:
+        - deprecation
+    - title: Removed
+      labels:
+        - removal
+    - title: Fixed
+      labels:
+        - bug
+    - title: Security
+      labels:
+        - security
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other
+      labels:
+        - "*"
