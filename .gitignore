@@ -47,3 +47,5 @@ app/client/dist/
 
 # Runtime logs
 engine.log
+# MkDocs build output
+site/

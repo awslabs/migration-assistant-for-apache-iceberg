@@ -530,7 +530,7 @@ print_outputs() {
 
   echo ""
   echo "  Next steps:"
-  echo "    1. Configure settings in the app UI (see docs/deployment-guide.md § 8)"
+  echo "    1. Configure settings in the app UI (see docs/deployment-guide.md § 10)"
   echo "    2. Set AGENT_URL to the AgentCore runtime ARN"
   echo ""
 }

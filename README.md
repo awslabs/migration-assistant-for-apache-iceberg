@@ -162,7 +162,7 @@ The script auto-detects finch/docker, creates ECR repos idempotently, builds all
 
 Each step — including the exact commands, the full policy/permission tables, and
 the complete list of settings — is documented in
-[Section 8 (Post-Deployment Configuration) of docs/deployment-guide.md](docs/deployment-guide.md#8-post-deployment-configuration).
+[Section 10 (Post-Deployment Configuration) of docs/deployment-guide.md](docs/deployment-guide.md#10-post-deployment-configuration).
 Follow it end to end before using the solution.
 
 

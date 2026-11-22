@@ -387,7 +387,7 @@ strategy, or adjust the table after migration.
 If a Managed Migration table never leaves `pending` or fails immediately with a
 parameter error, the engine image is likely missing the S3 Tables Migration
 model, or the migration role / reports bucket is not configured — see the
-Deployment Guide (§3 and §12a).
+Deployment Guide (§5 and §14).
 
 ---
 
@@ -559,7 +559,7 @@ Quick triage for the most common situations.
 | Finalize button not available | Not all tables in a finalizable state | Section 10 eligibility rules; bring stragglers to in_sync/staged |
 | Managed Migration table stuck `awaiting_review` | Waiting for operator approval of the compatibility plan | Table detail → plan-review card → **Approve** (Section 8.1) |
 | Managed Migration failed and the message says "no reports were written" | The service failed before planning produced any report, so there is nothing in S3 to open; the failure reason (e.g. `sourcePermissions`) is the whole story | Fix the reason shown, then Retry. If reports are expected but missing after a successful plan, confirm the engine stack is current: its role may still be scoped to an older reports prefix (`migration-reports/*`) |
-| Managed Migration fails immediately with a parameter error | Engine image missing the S3 Tables Migration model, or migration role / reports bucket unset | Deployment Guide §3 and §12a |
+| Managed Migration fails immediately with a parameter error | Engine image missing the S3 Tables Migration model, or migration role / reports bucket unset | Deployment Guide §5 and §14 |
 | Validation checks show "skipped" | Engine role lacks Glue read (column resolution for V7) | Section 2; grant Glue read to the engine role |
 
 For anything that isn't behavior you can resolve from the UI/Settings, the

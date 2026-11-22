@@ -16,6 +16,7 @@ for understanding a strategy's correctness or failure modes.
 5. [Add Files Strategy](#5-add-files-strategy)
 6. [Managed Migration Strategy](#6-managed-migration-strategy)
 7. [Cross-Strategy Comparison](#7-cross-strategy-comparison)
+8. [Concurrent status updates](#8-concurrent-status-updates)
 
 ---
 
@@ -1159,7 +1160,7 @@ post-migration parity left to the validation subsystem.
 
 ---
 
-## Concurrent status updates
+## 8. Concurrent status updates
 
 Two kinds of writers change a pipeline's status at the same time: the reconcile
 loop (up to `ENGINE_RECONCILE_WORKERS` threads, each working from a snapshot)
