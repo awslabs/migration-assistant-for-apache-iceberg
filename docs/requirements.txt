@@ -1,0 +1,5 @@
+# Docs site build dependencies (MkDocs + Material theme), pinned so local and
+# CI builds match. Used by .github/workflows/docs.yml.
+mkdocs==1.6.1
+mkdocs-material==9.8.2
+pymdown-extensions==13.1.2

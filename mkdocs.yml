@@ -1,0 +1,58 @@
+site_name: Migration Assistant for Apache Iceberg
+site_url: https://awslabs.github.io/migration-assistant-for-apache-iceberg/
+repo_url: https://github.com/awslabs/migration-assistant-for-apache-iceberg
+repo_name: awslabs/migration-assistant-for-apache-iceberg
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  palette:
+    scheme: slate
+  font:
+    text: DM Sans
+    code: JetBrains Mono
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+validation:
+  links:
+    anchors: warn
+
+hooks:
+  - docs/hooks/toc.py
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - tables
+  - toc:
+      permalink: true
+      # GitHub-style heading anchors, so in-doc links work on GitHub and the site
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+# Only the landing page is in the nav. Doc pages are reached from its cards.
+nav:
+  - Home: index.md
+
+not_in_nav: |
+  /*.md
+
+exclude_docs: |
+  hooks/
+  requirements.txt

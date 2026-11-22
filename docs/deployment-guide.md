@@ -1,6 +1,6 @@
 # Deployment Guide
 
-## Prerequisites
+## 1. Prerequisites
 
 - AWS CLI v2 configured
 - Finch **or** Docker installed — used to build and push the container images.
@@ -33,7 +33,7 @@
 
 > **Note:** `agent/agentcore/` (config + generated CDK project) is gitignored since it contains account-specific ARNs. `./deploy.sh --agent-only` regenerates the config and bootstraps the CDK project automatically on first run for a fresh clone.
 
-## Variables
+## 2. Variables
 
 ```bash
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -43,7 +43,7 @@ export ENV_NAME=ima
 
 ---
 
-## 1. Create ECR Repositories
+## 3. Create ECR Repositories
 
 ```bash
 aws ecr create-repository --repository-name ima-engine --region $AWS_REGION
@@ -52,16 +52,16 @@ aws ecr create-repository --repository-name ima-xtable-converter --region $AWS_R
 aws ecr create-repository --repository-name ima-db-bootstrap --region $AWS_REGION
 ```
 
-## 2. ECR Login
+## 4. ECR Login
 
 ```bash
 aws ecr get-login-password --region $AWS_REGION | \
   finch login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 ```
 
-## 3. Build & Push Images
+## 5. Build & Push Images
 
-### Engine
+### 5.1 Engine
 
 ```bash
 # Take about 5 minutes to build the image
@@ -77,7 +77,7 @@ finch push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-engine:latest
 > included in boto3/botocore **1.43.124** and later. The engine pins
 > `boto3>=1.43.124`, so the image picks it up with no extra steps.
 
-### App (Frontend + Backend)
+### 5.2 App (Frontend + Backend)
 
 Build the frontend first — the Dockerfile copies the pre-built `client/dist/` static files, it doesn't build them:
 
@@ -93,7 +93,7 @@ finch build --platform linux/amd64 \
 finch push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-app:latest
 ```
 
-### XTable Lambda (optional — Hudi/Delta morph only)
+### 5.3 XTable Lambda (optional — Hudi/Delta morph only)
 
 > **Optional and skipped by default.** The XTable image is only needed for the
 > Morph strategy on **Hudi/Delta** sources; all other strategies and the
@@ -121,7 +121,7 @@ finch push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-xtable-converte
 > Hudi 1.x, XTable conversions (Morph strategy for Hudi sources) will fail. Upgrade
 > to XTable 0.3.0+ when available for Hudi 1.x support.
 
-### DB Bootstrap Lambda
+### 5.4 DB Bootstrap Lambda
 
 Provisions the dedicated IAM-auth application database user.
 
@@ -135,7 +135,7 @@ finch push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-db-bootstrap:la
 
 ---
 
-## 4. Deploy Engine Stack
+## 6. Deploy Engine Stack
 
 The engine template exceeds CloudFormation's 51,200-byte inline limit, so it
 must be staged in S3 via `--s3-bucket`. Create a one-time artifacts bucket (the
@@ -161,7 +161,7 @@ aws cloudformation deploy \
 ```
 
 > **Recommended: generate least-privilege data-plane policies at deploy time.**
-> Instead of hand-editing IAM policies after deployment (§8), pass your source
+> Instead of hand-editing IAM policies after deployment (§10), pass your source
 > and target buckets as parameters and the stack generates tightly-scoped
 > policies automatically (explicit read/write actions on the named bucket ARNs,
 > never `s3:Get*`, with an optional `aws:ResourceAccount` guard):
@@ -174,11 +174,11 @@ aws cloudformation deploy \
 >
 > Add these to the `--parameter-overrides` above. If omitted, the data-plane
 > policies ship as an inert `Deny` placeholder (safe default — migrations will
-> not work until you grant access per §8). The same `SourceBucketNames` /
-> `SourceAccountIds` parameters are also accepted by the **agent** stack (§7a).
+> not work until you grant access per §10). The same `SourceBucketNames` /
+> `SourceAccountIds` parameters are also accepted by the **agent** stack (§9.1).
 
 
-## 5. Upload Spark Scripts
+## 7. Upload Spark Scripts
 
 ```bash
 SCRIPTS_BUCKET=$(aws cloudformation describe-stacks --stack-name $ENV_NAME-engine \
@@ -189,7 +189,7 @@ aws s3 sync engine/src/spark/ s3://$SCRIPTS_BUCKET/scripts/
 
 ---
 
-## 6. Deploy App Stack
+## 8. Deploy App Stack
 
 ```bash
 # Get VPC and networking outputs from engine stack
@@ -225,21 +225,21 @@ aws cloudformation deploy \
 
 > `RequireMfa` (default `false`) makes TOTP MFA **mandatory** for admin/editor
 > users when set to `true` — they must enroll a second factor before using the
-> app. Leave it `false` to keep MFA opt-in per user. See [§11](#11-authentication).
+> app. Leave it `false` to keep MFA opt-in per user. See [§12](#12-authentication).
 
 > The seeded `admin` account's one-time password is generated into Secrets
 > Manager at `$ENV_NAME/app/bootstrap-admin-password`. Retrieve it at first login 
 
 > `NotificationSenderEmail` and `NotificationEventBusName` are optional (default to
-> empty and `default`). See [§9 Notifications](#9-notifications-optional) for setup.
+> empty and `default`). See [§11 Notifications](#11-notifications-optional) for setup.
 > The app stack always creates the notification Lambda + EventBridge rule; they stay
 > dormant until notifications are enabled in Settings and a verified SES sender is set.
 
 ---
 
-## 7. Deploy Agent
+## 9. Deploy Agent
 
-### 7a. Deploy IAM Role & Artifacts Bucket (CloudFormation)
+### 9.1 Deploy IAM Role & Artifacts Bucket (CloudFormation)
 
 ```bash
 aws cloudformation deploy \
@@ -254,9 +254,9 @@ aws cloudformation deploy \
 > Like the engine stack, the agent stack accepts optional `SourceBucketNames`
 > and `SourceAccountIds` parameters to generate a least-privilege READ-ONLY
 > data-access policy for the agent automatically. Omit them to ship the inert
-> placeholder (grant access later per §8).
+> placeholder (grant access later per §10).
 
-### 7b. Deploy Agent to AgentCore (CLI)
+### 9.2 Deploy Agent to AgentCore (CLI)
 
 Install the AgentCore CLI (Node):
 
@@ -292,17 +292,17 @@ cd ..
 
 ---
 
-## 8. Post-Deployment Configuration
+## 10. Post-Deployment Configuration
 
-### Grant Data Access (required)
+### 10.1 Grant Data Access (required)
 
 The stacks deploy with **no access to your source data or target data** by
 default. There are two ways to grant it:
 
 **Option 1 (recommended) — generate least-privilege policies at deploy time.**
 Pass `SourceBucketNames` / `TargetBucketNames` / `SourceAccountIds` to the
-engine stack (§4) and `SourceBucketNames` / `SourceAccountIds` to the agent
-stack (§7a). The templates then generate tightly-scoped data-plane policies
+engine stack (§6) and `SourceBucketNames` / `SourceAccountIds` to the agent
+stack (§9.1). The templates then generate tightly-scoped data-plane policies
 automatically — explicit read/write actions on the named bucket ARNs (never
 `s3:Get*`), with an optional `aws:ResourceAccount` guard. If you used this
 option, the roles below are already correctly scoped and you can **skip to
@@ -324,7 +324,7 @@ least-privilege grants below (names use your `EnvironmentName`, default
 | `${ENV}-tracking-data-access` | S3 tracker Lambda | placeholder¹ | S3 source **read** |
 | `${ENV}-emr-data-access` | EMR Serverless | placeholder¹ | S3 source **read** + target **read/write** + Glue + S3 Tables + Lake Formation |
 | `${ENV}-xtable-data-access` | XTable Lambda | placeholder¹ | S3 source **read** + target **read/write** + Glue |
-| `${ENV}-s3tables-migration-data-access` | S3 Tables Migration role | placeholder¹ | S3 source **read** + Glue source-table **read** (Managed Migration only; see §12a) |
+| `${ENV}-s3tables-migration-data-access` | S3 Tables Migration role | placeholder¹ | S3 source **read** + Glue source-table **read** (Managed Migration only; see §14) |
 
 > ¹ These ship as a generated least-privilege policy when you use Option 1, or
 > as an inert `Deny` placeholder when you don't. The **App** policy is never a
@@ -336,12 +336,12 @@ least-privilege grants below (names use your `EnvironmentName`, default
 > Tables control/data-plane actions and reports-bucket write are already granted
 > in-stack; only the **source-read** grant ships as a placeholder (or is
 > generated from `SourceBucketNames`). If you are not using Managed Migration
-> you can ignore it. See [§12a](#12a-managed-migration-s3-tables) for details.
+> you can ignore it. See [§14](#14-managed-migration-s3-tables) for details.
 
 Refer to Appendix A for more details on minimal permissions set for each role.
 
 
-### Connect to the App via SSM
+### 10.2 Connect to the App via SSM
 
 The app runs in private subnets with no public endpoint. Use the jumphost deployed in the app stack to port-forward viaWhat SSM:
 
@@ -380,8 +380,8 @@ password it no longer works.
 > **Multi-factor authentication (MFA):** MFA is available to every user via
 > **Manage > Account > Enable MFA** (TOTP — scan the QR with an authenticator
 > app). To *require* MFA for privileged users, deploy the app stack with
-> `RequireMfa=true` (see §6); admins and editors are then forced to enroll a
-> second factor before they can use the app. See [§11 Authentication](#11-authentication).
+> `RequireMfa=true` (see §8); admins and editors are then forced to enroll a
+> second factor before they can use the app. See [§12 Authentication](#12-authentication).
 
 #### To terminate the session use the below commands
 
@@ -392,7 +392,7 @@ aws ssm describe-sessions --state Active --region $AWS_REGION \
   xargs -n1 aws ssm terminate-session --region $AWS_REGION --session-id
 ```
 
-### Configure Settings (via App UI)
+### 10.3 Configure Settings (via App UI)
 
 With the SSM session active and the app open at http://localhost:8000, navigate to **Manage > Settings** page and set:
 
@@ -432,13 +432,13 @@ cd agent && agentcore status && cd ..
 
 ------------------------------------------------------------------------------------
 
-## 9. Notifications (optional)
+## 11. Notifications (optional)
 
 The app can emit pipeline status events to Amazon EventBridge, which are delivered
 as per-recipient emails via a Lambda → SES pipeline. This is fully optional and
 disabled by default.
 
-### Setup
+### 11.1 Setup
 
 1. **Verify the SES sender identity** (required before any email is sent):
 
@@ -472,27 +472,27 @@ disabled by default.
    no separate notifications region to set.
 
 
-## 11. Authentication
+## 12. Authentication
 
 The Migration Assistant uses username/password login with opaque server-side sessions
 (HttpOnly, Secure, `SameSite=strict` cookies), bcrypt password hashing, login
 rate-limiting with account lockout, and role-based access control
 (admin/editor/viewer) plus group-based plan ownership.
 
-### Initial admin account
+### 12.1 Initial admin account
 
 There is **no default password**. On first deploy the stack generates a random
 one-time password for the seeded `admin` user into Secrets Manager at
 `$ENV_NAME/app/bootstrap-admin-password`. Retrieve it, log in as `admin`, and
 you are immediately forced to set a new password (see
-[§8 First login](#first-login-no-default-password)). Password policy: minimum
+[§10.2 First login](#first-login-no-default-password)). Password policy: minimum
 8 characters including upper- and lower-case letters, a digit, and a special
 character; the new password may not equal the old one.
 
 Admin-initiated password resets (**Manage > Users > Reset password**) likewise
 issue a temporary password and force the target user to change it at next login.
 
-### Multi-factor authentication (TOTP)
+### 12.2 Multi-factor authentication (TOTP)
 
 Any user can enable MFA from **Manage > Account > Enable MFA**: the app shows a
 QR code (an `otpauth://` URI) to scan with an authenticator app (Google
@@ -500,7 +500,7 @@ Authenticator, Authy, 1Password, etc.), then confirms with a 6-digit code.
 Once enabled, that user must supply a current TOTP code at every login.
 
 To make MFA **mandatory** for privileged users, deploy the app stack with
-`RequireMfa=true` (§6). Admins and editors without an enrolled factor are then
+`RequireMfa=true` (§8). Admins and editors without an enrolled factor are then
 blocked from the app (HTTP 403 `MFA_ENROLLMENT_REQUIRED`) until they enroll;
 viewers are not forced. This is off by default so existing deployments are not
 locked out on upgrade.
@@ -509,7 +509,7 @@ If a user loses their authenticator device, an admin can clear their MFA via
 **Manage > Users** (revoking the user's sessions), after which the user can
 re-enroll.
 
-### Network exposure & CORS
+### 12.3 Network exposure & CORS
 
 The two services have deliberately different exposure:
 
@@ -532,7 +532,7 @@ The two services have deliberately different exposure:
   have no legitimate consumer. Do not add a wildcard CORS policy to the engine.
 
 
-## 12. Engine Scaling Tunables
+## 13. Engine Scaling Tunables
 
 Environment variables on the **engine** service for scaling to 100s of
 pipelines. Defaults are safe; raise with DB/quota headroom in mind.
@@ -556,7 +556,7 @@ pipelines. Defaults are safe; raise with DB/quota headroom in mind.
 > Aurora's `max_connections`. Keep `ENGINE_MAX_RUNNING_PIPELINES` below your
 > EMR Serverless concurrent-job and Athena workgroup limits.
 
-### Additional engine env vars
+### 13.1 Additional engine env vars
 
 These are read by the engine but **not** injected by the engine stack's task
 definition. Defaults are production-safe; set them (via `/api/settings` or the
@@ -582,7 +582,7 @@ task environment) only to override. Grouped by purpose.
 > match your region/commitments so the UI's cost figures stay accurate.
 
 
-## 12a. Managed Migration (S3 Tables)
+## 14. Managed Migration (S3 Tables)
 
 The **Managed Migration** strategy (`s3tables_managed`) migrates Hive-Parquet
 sources into S3 Tables using the AWS **S3 Tables Migration API** instead of an
@@ -605,7 +605,7 @@ Athena/EMR data-movement job. It only applies to pipelines whose source is
 **What you must do:**
 
 1. **Grant the migration role source-read access — S3 *and* Glue.** Like the
-   other data-plane roles (§8), `S3TablesMigrationRole` ships with an inert `Deny`
+   other data-plane roles (§10), `S3TablesMigrationRole` ships with an inert `Deny`
    placeholder for source data unless you passed `SourceBucketNames` at
    engine-deploy time. Supply `SourceBucketNames` (and `SourceAccountIds` for
    cross-account) to generate the grant, or hand-author
@@ -618,7 +618,7 @@ Athena/EMR data-movement job. It only applies to pipelines whose source is
    If you deployed with a template that predates the Glue statement, update the
    engine stack.
 2. **Build the engine image with boto3 >= 1.43.124** (the engine's pinned
-   minimum; see [§3 Engine](#engine)). Older botocore
+   minimum; see [§5.1 Engine](#51-engine)). Older botocore
    releases lack the Migration API.
 
 **Operator interaction — plan review/approval.** Managed migrations start with
@@ -635,7 +635,7 @@ drives status, and cutover is a `complete_table_migration` call.
 > table bucket. `ENGINE_S3TABLES_REGION` only affects other S3 Tables calls.
 
 
-## 12b. Data Validation
+## 15. Data Validation
 
 The Migration Assistant can validate a migrated table against its source. Validation runs
 **on-demand** from the app and compares source vs target. Two tiers:
@@ -674,9 +674,9 @@ Results are stored in the `ENGINE_VALIDATION_TABLE` DynamoDB table
 concurrency/polling via the validation env vars in the table above.
 
 
-## Update Deployments
+## 16. Update Deployments
 
-### Update Engine Image
+### 16.1 Update Engine Image
 
 ```bash
 finch build --platform linux/amd64 -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-engine:latest engine/
@@ -684,7 +684,7 @@ finch push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-engine:latest
 aws ecs update-service --cluster $ENV_NAME-engine --service $ENV_NAME-engine --force-new-deployment --region $AWS_REGION
 ```
 
-### Update App Image
+### 16.2 Update App Image
 
 ```bash
 cd app/client && npm run build && cd ../..
@@ -693,7 +693,7 @@ finch push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-app:latest
 aws ecs update-service --cluster $ENV_NAME-app --service $ENV_NAME-app --force-new-deployment --region $AWS_REGION
 ```
 
-### Update XTable Lambda
+### 16.3 Update XTable Lambda
 
 Via `deploy.sh` (rebuilds + pushes the image and updates the Lambda — the
 `--with-xtable` flag is required, since image builds skip XTable by default):
@@ -711,7 +711,7 @@ aws lambda update-function-code --function-name ima-xtable-converter-$AWS_REGION
   --image-uri $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-xtable-converter:latest --region $AWS_REGION
 ```
 
-### Update DB Bootstrap Lambda
+### 16.4 Update DB Bootstrap Lambda
 
 ```bash
 finch build --platform linux/amd64 -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/ima-db-bootstrap:latest app/infra/db-bootstrap-lambda/
@@ -722,7 +722,7 @@ aws lambda update-function-code --function-name $ENV_NAME-db-bootstrap \
 
 ---
 
-## Teardown
+## 17. Teardown
 
 Before deleting the CloudFormation stacks, disable deletion protection on the Aurora cluster, and empty the Scripts and logs S3 buckets created during setup.
 
@@ -733,7 +733,7 @@ aws cloudformation delete-stack --stack-name $ENV_NAME-engine --region $AWS_REGI
 ```
 
 
-## Appendix
+## 18. Appendix
 
 #### [A] Minimal permission sets per role
 
