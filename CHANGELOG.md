@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.1.1] - 2026-11-22
+
 ### Added
 
 - The documentation is published as a website on GitHub Pages, at https://awslabs.github.io/migration-assistant-for-apache-iceberg/. It has a landing page that links to each guide, and it is rebuilt from each release.
@@ -20,4 +22,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
+[0.1.1]: https://github.com/awslabs/migration-assistant-for-apache-iceberg/releases/tag/v0.1.1
 [0.1.0]: https://github.com/awslabs/migration-assistant-for-apache-iceberg/releases/tag/v0.1.0
