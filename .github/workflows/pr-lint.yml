@@ -1,0 +1,54 @@
+# Pull-request metadata checks: Conventional Commits title and the
+# do-not-merge label. Both read only the event payload; no code is checked out.
+#
+# The trigger is `pull_request` (never `pull_request_target`), so a fork PR
+# runs with a read-only token, as in pr.yml.
+name: PR lint
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened, ready_for_review, labeled, unlabeled]
+# Least privilege: the title check reads the PR; nothing writes.
+permissions:
+  pull-requests: read
+concurrency:
+  group: pr-lint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  # The squash-merge commit takes the PR title, so it must follow
+  # Conventional Commits (same types as awslabs/mcp).
+  title:
+    name: Conventional Commits title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: amannn/action-semantic-pull-request@2252a14e810aa9b85c2d560bd7070c802206ecf6 # v6.1.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |-
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            test
+          requireScope: false
+  # Fails while the PR carries the do-not-merge label.
+  do-not-merge:
+    name: do-not-merge label
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check for the do-not-merge label
+        env:
+          BLOCKED: ${{ contains(github.event.pull_request.labels.*.name, 'do-not-merge') }}
+        run: |
+          if [ "$BLOCKED" = "true" ]; then
+            echo "::error::Remove the do-not-merge label to merge this PR."
+            exit 1
+          fi
+          echo "No do-not-merge label."
